@@ -6,21 +6,22 @@ description: |
   C++ version and continuation of bashtop and bpytop.
 license: Apache-2.0
 
-base: core22
+base: core24
 grade: stable
 confinement: strict
 compression: lzo
 
-architectures:
-  - build-on: amd64
-  - build-on: arm64
-  - build-on: armhf
-  - build-on: ppc64el
-  - build-on: s390x
+platforms:
+  amd64:
+    build-on: [amd64]
+    build-for: [amd64]
+  arm64:
+    build-on: [arm64]
+    build-for: [arm64]
 
-package-repositories:
- - type: apt
-   ppa: ubuntu-toolchain-r/test
+layout:
+  /usr/lib/$CRAFT_ARCH_TRIPLET_BUILD_FOR/libproxy/libpxbackend-1.0.so:
+    symlink: $SNAP/gnome-platform/usr/lib/$CRAFT_ARCH_TRIPLET_BUILD_FOR/libproxy/libpxbackend-1.0.so
 
 apps:
   btop:
@@ -45,19 +46,13 @@ parts:
     source-type: git
     plugin: make
     make-parameters:
-      - CXX=g++-11
-      - PREFIX=/usr/local
+      - CXX=g++-13
+      - PREFIX=/usr
       - STATIC=true
       - ADDFLAGS="-D SNAPPED"
-    # Add 'lowdown' to build dependencies as soon at Snap builder updates from
-    # Ubuntu 20.04 "Focal" to something newer that has Lowdown included
-    build-packages:
-      - coreutils
-      - sed
-      - git
-      - build-essential
-      - gcc-11
-      - g++-11
+    override-pull: |
+      craftctl default
+      craftctl set version="$(git describe --tags | sed 's/^v//' | cut -d "-" -f1)"
 
     override-pull: |
       snapcraftctl pull
