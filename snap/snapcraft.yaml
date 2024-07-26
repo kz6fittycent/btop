@@ -19,10 +19,6 @@ platforms:
     build-on: [arm64]
     build-for: [arm64]
 
-layout:
-  /usr/lib/$CRAFT_ARCH_TRIPLET_BUILD_FOR/libproxy/libpxbackend-1.0.so:
-    symlink: $SNAP/gnome-platform/usr/lib/$CRAFT_ARCH_TRIPLET_BUILD_FOR/libproxy/libpxbackend-1.0.so
-
 apps:
   btop:
     command: usr/local/bin/btop
@@ -47,7 +43,7 @@ parts:
     plugin: make
     make-parameters:
       - CXX=g++-13
-      - PREFIX=/usr
+      - PREFIX=/usr/local
       - STATIC=true
       - ADDFLAGS="-D SNAPPED"
     override-pull: |
