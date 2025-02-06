@@ -45,8 +45,7 @@ parts:
       - CXX=g++-13
       - PREFIX=/usr/local
       - STATIC=true
-      - ADDFLAGS="-D SNAPPED"
-      - GPU_SUPPORT=true
+#      - ADDFLAGS="-D SNAPPED"
     override-pull: |
       craftctl default
       craftctl set version="$(git describe --tags | sed 's/^v//' | cut -d "-" -f1)"
