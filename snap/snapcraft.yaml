@@ -50,6 +50,6 @@ parts:
       craftctl default
       craftctl set version="$(git describe --tags | sed 's/^v//' | cut -d "-" -f1)"
 
-    stage-packages:
+    build-packages:
       - libnvidia-ml-dev
       - librocm-smi-dev
