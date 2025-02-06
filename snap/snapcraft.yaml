@@ -52,4 +52,8 @@ parts:
 
     build-packages:
       - libnvidia-ml-dev
-      - librocm-smi-dev
+      - rocm-smi
+      
+    stage-packages:
+      - rocm-smi
+      - libnvidia-ml-dev
