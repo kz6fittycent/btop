@@ -11,6 +11,10 @@ grade: stable
 confinement: strict
 compression: lzo
 
+contact: https://github.com/kz6fittycent/btop/issues
+issues: https://github.com/kz6fittycent/btop/issues
+source-code: https://github.com/aristocratos/btop
+
 platforms:
   amd64:
     build-on: [amd64]
