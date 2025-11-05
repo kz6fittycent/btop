@@ -61,12 +61,14 @@ parts:
   gcc-15:
     source: https://gcc.gnu.org/git/gcc.git
     source-type: git
-    source-tag: releases/gcc-15
+    source-branch: releases/gcc-15
     plugin: autotools   
-    configflags:
+    autotools-configure-parameters:
       - --enable-languages=c,c++
       - --disable-multilib
-      - --prefix=/usr/local    
+      - --prefix=/usr/local
+      - --disable-bootstrap
+      - --disable-share   
     build-packages:
       - build-essential 
       - pkg-config
