@@ -89,3 +89,7 @@ parts:
       - tar
       - python3
       - autoconf
+    stage:
+      - usr/local/bin/gcc-15
+      - usr/local/bin/g++-15
+      - usr/local/lib/*      
