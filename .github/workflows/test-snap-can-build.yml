@@ -1,41 +1,31 @@
-name: 🧪 Test snap can be built on x86_64
+name: 🧪 Snap Builds
+
 on:
-  workflow_dispatch:
   push:
-   branches: [ main ]
-   tags-ignore:
-      - '*.*'     
-   paths:
-      - 'src/**'
-      - '!src/osx/**'
-      - '!src/freebsd/**'
-      - 'include/**'
-      - 'Makefile'
-      - '.github/workflows/test-snap-can-build.yml'
+    branches: '*'
   pull_request:
-   branches: [ main ]
-   paths:
-      - 'src/**'
-      - '!src/osx/**'
-      - '!src/freebsd/**'
-      - 'include/**'
-      - 'Makefile'
-      - '.github/workflows/test-snap-can-build.yml'
- 
+    branches: '*'
+    
 jobs:
   build:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        node-version: [20.x]
-        
+        node-version: [20.x]    
+
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
 
       - uses: snapcore/action-build@v1
         id: build
+        
+      - uses: anchore/scan-action@v6
+        id: scan            
 
       - uses: diddlesnaps/snapcraft-review-action@v1
         with:
           snap: ${{ steps.build.outputs.snap }}
           isClassic: 'false'
+          # Plugs and Slots declarations to override default denial (requires store assertion to publish)
+          # plugs: ./plug-declaration.json
+          # slots: ./slot-declaration.json
