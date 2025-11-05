@@ -47,6 +47,8 @@ parts:
     after:
       - gcc-15
     plugin: make
+    build-environment:
+      - PATH: $PATH:$CRAFT_STAGE/usr/local/bin    
     make-parameters:
       - CC=gcc-15
       - CXX=g++-15
