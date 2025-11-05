@@ -60,5 +60,9 @@ parts:
       craftctl default
       craftctl set version="$(git describe --tags | sed 's/^v//' | cut -d "-" -f1)"
  
-    build-packages:
+    build-packages:  # Built-in: Pulls from PPA for build env
       - gcc-15
+      - g++-15
+      
+    stage-packages:  # Built-in: Runtime libs (minimal)
+      - libstdc++6  # GCC-15 compatible
