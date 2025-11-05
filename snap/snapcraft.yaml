@@ -68,7 +68,7 @@ parts:
       - --disable-multilib
       - --prefix=/usr/local
       - --disable-bootstrap
-      - --disable-share   
+      - --disable-shared   
     build-packages:
       - build-essential 
       - pkg-config
