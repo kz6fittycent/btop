@@ -60,52 +60,60 @@ parts:
       craftctl default
       craftctl set version="$(git describe --tags | sed 's/^v//' | cut -d "-" -f1)"
 
-    override-build: |
-      export PATH="$CRAFT_STAGE/usr/local/bin:$PATH"
-      
-      # Debug
-      echo "PATH: $PATH"
-      echo "gcc-15: $(which gcc-15 || echo 'NOT FOUND')"
-      echo "g++-15: $(which g++-15 || echo 'NOT FOUND')"
-
-      craftctl default
-
   gcc-15:
-    source: https://gcc.gnu.org/git/gcc.git
-    source-type: git
-    source-branch: releases/gcc-15
-    plugin: autotools
-    autotools-configure-parameters:
-      - --enable-languages=c,c++
-      - --disable-multilib
-      - --prefix=/usr/local
-      - --disable-bootstrap
-      - --disable-shared
-      - --enable-static
-      - --with-system-zlib
-      - --disable-nls
-    override-build: | 
+    plugin: nil
+    override-pull: |
       craftctl default
-      make install-gcc install-target-libgcc
-      rm -rf $CRAFT_PART_INSTALL/usr/local/share  # Size reduction
-      find $CRAFT_PART_INSTALL -name "*.la" -delete
-      
-    build-packages: 
+      wget https://gcc.gnu.org/pub/gcc/infrastructure/gmp-6.2.1.tar.bz2
+      wget https://gcc.gnu.org/pub/gcc/infrastructure/mpfr-4.1.0.tar.bz2
+      wget https://gcc.gnu.org/pub/gcc/infrastructure/mpc-1.2.1.tar.gz
+      git clone --branch releases/gcc-15.1.0 --depth 1 --single-branch https://gcc.gnu.org/git/gcc.git gcc_src
+      tar xvf gmp-6.2.1.tar.bz2
+      tar xvf mpfr-4.1.0.tar.bz2
+      tar xvf mpc-1.2.1.tar.gz
+      rm gmp-6.2.1.tar.bz2
+      rm mpfr-4.1.0.tar.bz2
+      rm mpc-1.2.1.tar.gz
+    build-packages:
+      - wget
+      - git
+      - tar
       - build-essential
-      - gawk
       - flex
       - bison
-      - libgmp-dev
-      - libmpfr-dev
-      - libmpc-dev
-      - python3
-      - perl
-      - libisl-dev
-      - libzstd-dev
-      - zlib1g-dev
-    stage:
-      - usr/local/bin/gcc*
-      - usr/local/bin/g++*
-      - usr/local/lib/libgcc*
-      - usr/local/lib/libstdc++*
+    override-build: |
+      craftctl default
+      export GCC_PREFIX=/snap/gcc/current/usr
+      mkdir -p $GCC_PREFIX
+      mkdir -p /root/prime/usr
+      cd gmp-6.2.1
+      ./configure --prefix=$GCC_PREFIX
+      make
+      make install
+      cd ..
+      cd mpfr-4.1.0
+      ./configure --prefix=$GCC_PREFIX  --with-gmp=$GCC_PREFIX 
+      make
+      make install
+      cd ..
+      cd mpc-1.2.1
+      ./configure --prefix=$GCC_PREFIX --with-gmp=$GCC_PREFIX --with-mpfr=$GCC_PREFIX
+      make
+      make install
+      cd ..
+      mkdir gcc_obj
+      cd gcc_obj
+      ../gcc_src/configure --prefix=$GCC_PREFIX --with-local-prefix=$GCC_PREFIX --with-gmp=$GCC_PREFIX --with-mpfr=$GCC_PREFIX --with-mpc=$GCC_PREFIX --disable-multilib --host=x86_64-pc-linux-gnu --enable-languages=c,c++,lto
+      make -j 4
+      make install
+
+    override-stage: |
+      craftctl default
+      export GCC_PREFIX=/snap/gcc/current/usr
+      mv $GCC_PREFIX/* /root/prime/usr/
+      env >  /root/prime/artifact_generated_at_stage.sh
+      
+    override-prime: |
+      craftctl default
+      env >  /root/prime/artifact_generated_at_prime.sh
  
