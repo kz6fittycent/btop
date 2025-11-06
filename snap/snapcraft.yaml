@@ -60,6 +60,16 @@ parts:
       craftctl default
       craftctl set version="$(git describe --tags | sed 's/^v//' | cut -d "-" -f1)"
 
+    override-build: |
+      export PATH="$CRAFT_STAGE/usr/local/bin:$PATH"
+      
+      # Debug
+      echo "PATH: $PATH"
+      echo "gcc-15: $(which gcc-15 || echo 'NOT FOUND')"
+      echo "g++-15: $(which g++-15 || echo 'NOT FOUND')"
+
+      craftctl default
+
   gcc-15:
     source: https://gcc.gnu.org/git/gcc.git
     source-type: git
