@@ -5,13 +5,16 @@ description: |
   Resource monitor that shows usage and stats for processor, memory, disks, network and processes.
   C++ version and continuation of bashtop and bpytop.
 license: Apache-2.0
+
 base: core24
 grade: stable
 confinement: strict
 compression: lzo
+
 contact: https://github.com/kz6fittycent/btop/issues
 issues: https://github.com/kz6fittycent/btop/issues
 source-code: https://github.com/aristocratos/btop
+
 platforms:
   amd64:
     build-on: [amd64]
@@ -19,6 +22,7 @@ platforms:
   arm64:
     build-on: [arm64]
     build-for: [arm64]
+
 apps:
   btop:
     command: usr/local/bin/btop
@@ -35,82 +39,26 @@ apps:
       - home
       - removable-media
       - opengl
+
 parts:
   btop:
     source: https://github.com/aristocratos/btop
     source-type: git
-    after:
-      - gcc-15
     plugin: make
-    build-environment:
-      - PATH: $PATH:$CRAFT_STAGE/usr/bin
     make-parameters:
-      - CC=gcc-15
-      - CXX=g++-15
+      - CC=gcc-14
+      - CXX=g++-14
       - PREFIX=/usr/local
       - STATIC=true #required
       - ADDFLAGS="-D SNAPPED" #required
-   
+    build-packages:
+      - coreutils
+      - sed
+      - git
+      - build-essential
+      - gcc-14
+      - g++-14
+    
     override-pull: |
       craftctl default
       craftctl set version="$(git describe --tags | sed 's/^v//' | cut -d "-" -f1)"
-  gcc-15:
-    plugin: nil
-    override-pull: |
-      craftctl default
-      wget https://gcc.gnu.org/pub/gcc/infrastructure/gmp-6.2.1.tar.bz2
-      wget https://gcc.gnu.org/pub/gcc/infrastructure/mpfr-4.1.0.tar.bz2
-      wget https://gcc.gnu.org/pub/gcc/infrastructure/mpc-1.2.1.tar.gz
-      git clone --branch releases/gcc-15.1.0 --depth 1 --single-branch https://gcc.gnu.org/git/gcc.git gcc_src
-      tar xvf gmp-6.2.1.tar.bz2
-      tar xvf mpfr-4.1.0.tar.bz2
-      tar xvf mpc-1.2.1.tar.gz
-      rm gmp-6.2.1.tar.bz2
-      rm mpfr-4.1.0.tar.bz2
-      rm mpc-1.2.1.tar.gz
-    build-packages:
-      - wget
-      - git
-      - tar
-      - build-essential
-      - flex
-      - bison
-    override-build: |
-      craftctl default
-      if [ "$CRAFT_ARCH_BUILD_FOR" = "amd64" ]; then
-        HOST_TRIPLE="x86_64-pc-linux-gnu"
-      elif [ "$CRAFT_ARCH_BUILD_FOR" = "arm64" ]; then
-        HOST_TRIPLE="aarch64-pc-linux-gnu"
-      else
-        echo "Unsupported architecture: $CRAFT_ARCH_BUILD_FOR"
-        exit 1
-      fi
-      export GCC_PREFIX=$CRAFT_PART_INSTALL/usr
-      mkdir -p $GCC_PREFIX
-      cd gmp-6.2.1
-      ./configure --prefix=$GCC_PREFIX
-      make
-      make install
-      cd ..
-      cd mpfr-4.1.0
-      ./configure --prefix=$GCC_PREFIX --with-gmp=$GCC_PREFIX
-      make
-      make install
-      cd ..
-      cd mpc-1.2.1
-      ./configure --prefix=$GCC_PREFIX --with-gmp=$GCC_PREFIX --with-mpfr=$GCC_PREFIX
-      make
-      make install
-      cd ..
-      mkdir gcc_obj
-      cd gcc_obj
-      ../gcc_src/configure --prefix=$GCC_PREFIX --with-local-prefix=$GCC_PREFIX --with-gmp=$GCC_PREFIX --with-mpfr=$GCC_PREFIX --with-mpc=$GCC_PREFIX --disable-multilib --host=$HOST_TRIPLE --enable-languages=c,c++,lto
-      make -j 4
-      make install
-    override-stage: |
-      craftctl default
-      env > $CRAFT_PRIME/artifact_generated_at_stage.sh
-     
-    override-prime: |
-      craftctl default
-      env > $CRAFT_PRIME/artifact_generated_at_prime.sh
