@@ -5,16 +5,13 @@ description: |
   Resource monitor that shows usage and stats for processor, memory, disks, network and processes.
   C++ version and continuation of bashtop and bpytop.
 license: Apache-2.0
-
 base: core24
 grade: stable
 confinement: strict
 compression: lzo
-
 contact: https://github.com/kz6fittycent/btop/issues
 issues: https://github.com/kz6fittycent/btop/issues
 source-code: https://github.com/aristocratos/btop
-
 platforms:
   amd64:
     build-on: [amd64]
@@ -22,7 +19,6 @@ platforms:
   arm64:
     build-on: [arm64]
     build-for: [arm64]
-
 apps:
   btop:
     command: usr/local/bin/btop
@@ -39,7 +35,6 @@ apps:
       - home
       - removable-media
       - opengl
-
 parts:
   btop:
     source: https://github.com/aristocratos/btop
@@ -48,18 +43,17 @@ parts:
       - gcc-15
     plugin: make
     build-environment:
-      - PATH: $PATH:$CRAFT_STAGE/usr/local/bin    
+      - PATH: $PATH:$CRAFT_STAGE/usr/bin
     make-parameters:
       - CC=gcc-15
       - CXX=g++-15
       - PREFIX=/usr/local
       - STATIC=true #required
       - ADDFLAGS="-D SNAPPED" #required
-    
+   
     override-pull: |
       craftctl default
       craftctl set version="$(git describe --tags | sed 's/^v//' | cut -d "-" -f1)"
-
   gcc-15:
     plugin: nil
     override-pull: |
@@ -83,16 +77,23 @@ parts:
       - bison
     override-build: |
       craftctl default
-      export GCC_PREFIX=/snap/gcc/current/usr
+      if [ "$CRAFT_ARCH_BUILD_FOR" = "amd64" ]; then
+        HOST_TRIPLE="x86_64-pc-linux-gnu"
+      elif [ "$CRAFT_ARCH_BUILD_FOR" = "arm64" ]; then
+        HOST_TRIPLE="aarch64-pc-linux-gnu"
+      else
+        echo "Unsupported architecture: $CRAFT_ARCH_BUILD_FOR"
+        exit 1
+      fi
+      export GCC_PREFIX=$CRAFT_PART_INSTALL/usr
       mkdir -p $GCC_PREFIX
-      mkdir -p /root/prime/usr
       cd gmp-6.2.1
       ./configure --prefix=$GCC_PREFIX
       make
       make install
       cd ..
       cd mpfr-4.1.0
-      ./configure --prefix=$GCC_PREFIX  --with-gmp=$GCC_PREFIX 
+      ./configure --prefix=$GCC_PREFIX --with-gmp=$GCC_PREFIX
       make
       make install
       cd ..
@@ -103,17 +104,13 @@ parts:
       cd ..
       mkdir gcc_obj
       cd gcc_obj
-      ../gcc_src/configure --prefix=$GCC_PREFIX --with-local-prefix=$GCC_PREFIX --with-gmp=$GCC_PREFIX --with-mpfr=$GCC_PREFIX --with-mpc=$GCC_PREFIX --disable-multilib --host=x86_64-pc-linux-gnu --enable-languages=c,c++,lto
+      ../gcc_src/configure --prefix=$GCC_PREFIX --with-local-prefix=$GCC_PREFIX --with-gmp=$GCC_PREFIX --with-mpfr=$GCC_PREFIX --with-mpc=$GCC_PREFIX --disable-multilib --host=$HOST_TRIPLE --enable-languages=c,c++,lto
       make -j 4
       make install
-
     override-stage: |
       craftctl default
-      export GCC_PREFIX=/snap/gcc/current/usr
-      mv $GCC_PREFIX/* /root/prime/usr/
-      env >  /root/prime/artifact_generated_at_stage.sh
-      
+      env > $CRAFT_PRIME/artifact_generated_at_stage.sh
+     
     override-prime: |
       craftctl default
-      env >  /root/prime/artifact_generated_at_prime.sh
- 
+      env > $CRAFT_PRIME/artifact_generated_at_prime.sh
