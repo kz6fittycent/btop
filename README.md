@@ -1077,12 +1077,6 @@ If you have an AMD GPU `rocm_smi_lib` is required, which may or may not be packa
     or
     sudo snap install btop-desktop
     ```
- * **Install the latest snap from the edge channel**
-   ```
-   sudo snap install btop --edge
-   or
-   sudo snap install btop-desktop --edge
-   ```
 
  * **Connect the interface**
 
