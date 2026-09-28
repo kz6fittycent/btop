@@ -1,0 +1,46 @@
+name: 📦 Publish Snap
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'snap/**'
+      - '.github/workflows/publish-snap.yml'
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+concurrency:
+  group: publish-snap
+  cancel-in-progress: false
+
+jobs:
+  build-and-publish:
+    name: Build and publish (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: snapcore/action-build@v1
+        id: build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: btop-snap-${{ matrix.arch }}
+          path: ${{ steps.build.outputs.snap }}
+
+      - uses: snapcore/action-publish@v1
+        env:
+          SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
+        with:
+          snap: ${{ steps.build.outputs.snap }}
+          release: stable
