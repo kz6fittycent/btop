@@ -19,10 +19,12 @@ tab-size = 4
 #include <cmath>
 #include <fstream>
 #include <unistd.h>
+#include <algorithm>
 
-#include "btop_tools.hpp"
 #include "btop_config.hpp"
+#include "btop_log.hpp"
 #include "btop_theme.hpp"
+#include "btop_tools.hpp"
 
 using std::round;
 using std::stoi;
@@ -41,6 +43,7 @@ namespace Theme {
 
 	fs::path theme_dir;
 	fs::path user_theme_dir;
+	fs::path custom_theme_dir;
 	vector<string> themes;
 	std::unordered_map<string, string> colors;
 	std::unordered_map<string, array<int, 3>> rgbs;
@@ -88,7 +91,13 @@ namespace Theme {
 		{ "upload_end", "#dcafde" },
 		{ "process_start", "#80d0a3" },
 		{ "process_mid", "#dcd179" },
-		{ "process_end", "#d45454" }
+		{ "process_end", "#d45454" },
+		{ "proc_pause_bg", "#b54040" },
+		{ "proc_follow_bg", "#4040b5"},
+		{ "proc_banner_bg", "#7b407b"},
+		{ "proc_banner_fg", "#ee"},
+		{ "followed_bg", "#4040b5"},
+		{ "followed_fg", "#ee"},
 	};
 
 	const std::unordered_map<string, string> TTY_theme = {
@@ -133,7 +142,13 @@ namespace Theme {
 		{ "upload_end", "\x1b[95m" },
 		{ "process_start", "\x1b[32m" },
 		{ "process_mid", "\x1b[33m" },
-		{ "process_end", "\x1b[31m" }
+		{ "process_end", "\x1b[31m" },
+		{ "proc_pause_bg", "\x1b[41m" },
+		{ "proc_follow_bg", "\x1b[44m" },
+		{ "proc_banner_bg", "\x1b[45m" },
+		{ "proc_banner_fg", "\x1b[97m" },
+		{ "followed_bg", "\x1b[44m" },
+		{ "followed_fg", "\x1b[97m" },
 	};
 
 	namespace {
@@ -155,7 +170,7 @@ namespace Theme {
 			hexa.erase(0, 1);
 			for (auto& c : hexa) {
 				if (not isxdigit(c)) {
-					Logger::error("Invalid hex value: " + hexa);
+					Logger::error("Invalid hex value: {}", hexa);
 					return "";
 				}
 			}
@@ -183,9 +198,9 @@ namespace Theme {
 						to_string(stoi(hexa.substr(4, 2), nullptr, 16)) + "m";
 				}
 			}
-			else Logger::error("Invalid size of hex value: " + hexa);
+			else Logger::error("Invalid size of hex value: {}", hexa);
 		}
-		else Logger::error("Hex value missing: " + hexa);
+		else Logger::error("Hex value missing: {}", hexa);
 		return "";
 	}
 
@@ -254,7 +269,7 @@ namespace Theme {
 					else if (not source.at(name).empty()) {
 						t_rgb = ssplit(source.at(name));
 						if (t_rgb.size() != 3) {
-							Logger::error("Invalid RGB decimal value: \"" + source.at(name) + "\"");
+							Logger::error("Invalid RGB decimal value: \"{}\"", source.at(name));
 						} else {
 							colors[name] = dec_to_color(stoi(t_rgb[0]), stoi(t_rgb[1]), stoi(t_rgb[2]), t_to_256, depth);
 							rgbs[name] = array{stoi(t_rgb[0]), stoi(t_rgb[1]), stoi(t_rgb[2])};
@@ -263,7 +278,7 @@ namespace Theme {
 					}
 				}
 				if (not colors.contains(name) and not is_in(name, "meter_bg", "process_start", "process_mid", "process_end", "graph_text")) {
-					Logger::debug("Missing color value for \"" + name + "\". Using value from default.");
+					Logger::debug("Missing color value for \"{}\". Using value from default.", name);
 					colors[name] = hex_to_color(color, t_to_256, depth);
 					rgbs[name] = hex_to_dec(color);
 				}
@@ -304,7 +319,7 @@ namespace Theme {
 
 			for (const auto& [name, source_arr] : rgbs) {
 				if (not name.ends_with("_start")) continue;
-				const string color_name = rtrim(name, "_start");
+				const string color_name { rtrim(name, "_start") };
 
 				//? input_colors[start,mid,end][red,green,blue]
 				const array<array<int, 3>, 3> input_colors = {
@@ -357,7 +372,7 @@ namespace Theme {
 
 			for (const auto& c : colors) {
 				if (not c.first.ends_with("_start")) continue;
-				const string base_name = rtrim(c.first, "_start");
+				const string base_name { rtrim(c.first, "_start") };
 				string section = "_start";
 				int split = colors.at(base_name + "_mid").empty() ? 50 : 33;
 				for (int i : iota(0, 101)) {
@@ -372,20 +387,25 @@ namespace Theme {
 
 		//* Load a .theme file from disk
 		auto loadFile(const string& filename) {
-			std::unordered_map<string, string> theme_out;
 			const fs::path filepath = filename;
 			if (not fs::exists(filepath))
 				return Default_theme;
 
 			std::ifstream themefile(filepath);
 			if (themefile.good()) {
-				Logger::debug("Loading theme file: " + filename);
+				std::unordered_map<string, string> theme_out;
+				Logger::debug("Loading theme file: {}", filename);
 				while (not themefile.bad()) {
+					if (themefile.peek() == '#') {
+						themefile.ignore(SSmax, '\n');
+						continue;
+					}
 					themefile.ignore(SSmax, '[');
 					if (themefile.eof()) break;
 					string name, value;
 					getline(themefile, name, ']');
 					if (not Default_theme.contains(name)) {
+						themefile.ignore(SSmax, '\n');
 						continue;
 					}
 					themefile.ignore(SSmax, '=');
@@ -394,6 +414,7 @@ namespace Theme {
 					if (themefile.peek() == '"') {
 						themefile.ignore(1);
 						getline(themefile, value, '"');
+						themefile.ignore(SSmax, '\n');
 					}
 					else getline(themefile, value, '\n');
 
@@ -410,7 +431,8 @@ namespace Theme {
 		themes.push_back("Default");
 		themes.push_back("TTY");
 
-		for (const auto& path : { user_theme_dir, theme_dir } ) {
+		//? Priority: custom_theme_dir -> user_theme_dir -> theme_dir
+		for (const auto& path : { custom_theme_dir, user_theme_dir, theme_dir } ) {
 			if (path.empty()) continue;
 			for (auto& file : fs::directory_iterator(path)) {
 				if (file.path().extension() == ".theme" and access(file.path().c_str(), R_OK) != -1 and not v_contains(themes, file.path().c_str())) {
@@ -419,13 +441,20 @@ namespace Theme {
 			}
 		}
 
+		//? Sort themes alphabetically
+		std::stable_sort(themes.begin() + 2, themes.end(), [](const string& a, const string& b) {
+			return fs::path(a).filename().string() < fs::path(b).filename().string();
+		});
+
 	}
 
 	void setTheme() {
 		const auto& theme = Config::getS("color_theme");
+		const auto theme_cfg_path = fs::path(theme);
 		fs::path theme_path;
 		for (const fs::path p : themes) {
-			if (p == theme or p.stem() == theme or p.filename() == theme) {
+			//? Check for match by full path, filename, stem or legacy absolute path
+			if (p == theme or p.filename() == theme or p.stem() == theme or (theme_cfg_path.is_absolute() and theme_cfg_path.filename() == p.filename())) {
 				theme_path = p;
 				break;
 			}

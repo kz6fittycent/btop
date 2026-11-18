@@ -1,3 +1,217 @@
+## v1.4.8
+
+References | Description | Author(s)
+--- | --- | ---
+#1390 | themes: load/save by name if possible | @katexochen
+#1649 | Fix atomic issues and data races in btop | @ItsMeSamey
+#1641 | fix: gate Apple Silicon GPU support to unbreak intel Mac builds | @NLagwal
+#1661 | AMD APU/iGPU sysfs backend for GPU monitoring | @mgajda
+#1663 | fix: use ISO 8601 format for log timestamps | @jsquyres
+#1662 | Fix possible thread deadlocks and power-event-based false stall detections | @jsquyres
+#1674 | fix: defer SIGWINCH resize handling | @jsquyres
+#1652 | Fix btop with amd gpu on rocm 7 as in Ubuntu 26.04 | @chiluk
+#1658 | Fix: Macos SIGABRT Crash during SMB TimeMachine Backups | @DerPlayer2001
+#1690 | fix: avoid macOS swap disk crash | @jsquyres
+#1709 | Fix -/+ key binding | @ebignumber
+#1805 | fix: ignore missing config dir if config file is present | @imnotpoz
+#1751 | fix: make background consistent in the Terminal is too small dialogue | @mint-tube
+--- | Maintenance | @deckstose
+
+## v1.4.7
+
+References | Description | Author(s)
+--- | --- | ---
+#1326 | Feat: Process following and following mode improvements | @vandabbin
+#1541 | feat: Add Apple Silicon GPU support via IOReport API | @gneitzke
+#1602 | feat: add Kanagawa Dragon theme | @Marcus441
+#1443 | Add twilight theme | @hastinbe
+#1433 | Add Swap upload/download speed graph option, Fix network graphs overlap | @TheSovietPancakes
+#1522 | Add Flexoki dark and light themes | @nsyout
+#1493 | Menu option to disable presets | @vandabbin
+#1492 | Create orange.theme | @neocerambyx
+#1564 | Add E hotkey to collapse/expand all processes in tree mode | @sardonyx001
+#1601 | fix: restore Apple Silicon temp reporting on M2 Pro | @RockBacon9922
+#1427 | fix regression from a switch to kIOMainPortDefault | @barracuda156
+#1429 | Fix hide and info buttons | @vandabbin
+#1452 | Fix mouse mapping for process kill buttons with vim keys enabled | @vandabbin
+#1454 | Fix kill buttons | @vandabbin
+#1456 | following mode fixes | @vandabbin
+#1458 | Fixes and Improvements for Pause and Follow modes | @vandabbin
+#1409 | fix: remove unused asprintf implementation function | @deckstose
+#1445 | fix: remove busy waiting when checking runner thread state | @deckstose
+#1491 | Update clock with preset change or show/hide box | @vandabbin
+#1521 | Tweaked RX/TX collection and drawing, Fix -Wparentheses warning | @TheSovietPancakes
+#1518 | fix: mem bottom border when net is not shown | @vandabbin
+#1515 | fix: force_tty menu option sets TTY mode on start | @vandabbin
+#1539 | fix: accumulate pwr_usage into pwr_total instead of mem_total in Gpu::collect() | @alephpiece
+#1622 | fix: read GPU/VRAM clocks when ROCm SMI reports version 1.x | @theRealWardo
+#1598 | fix: render a non-ascii chars in proc list | @deniskhud
+#1619 | fix CPU mib queries for OpenBSD, only display online CPUs in output | @busterb
+#1583 | fix: correctly map amd zen cpu core temps | @sola-contrib
+#1628 | fix: restore Intel Mac CPU temperature fallback | @seanniu93
+#1560 | fix: Use SVG features compatible with Qt SVG Tiny 1.1 | @ratijas
+ea977a0 | Update widechar detection and fix replace_ascii_control() removing wide characters | @aristocratos
+7657384 | Fix cpu watt overflow in cpu box + division by zero fix for cpu.temp_max | @aristocratos
+b36357b | Fixed missing CPU package temperature color (numeric value) | @aristocratos
+
+## v1.4.6
+
+References | Description | Author(s)
+--- | --- | ---
+#1272 | Skip 'H' and 'HX' suffix in AMD cpu name trimming | @ramdomPTM
+#1268 | feature: add process renice functionality | @goddamnparticle
+#1285 | Revert "Use /sys/dev/block/MAJOR:MINOR instead of /sys/block/NAME for disk I/O" #1270 | @deckstose
+#1277 | feat: Introduce cpu frequency display modes | @emiliopedrollo
+#1282 | Fix CPU frequency detection for LoongArch CPUs | @Twopic2
+#1275 | fix arrow keys that send 'O' instead of '[' | @vandabbin
+#1251 | OpenBSD: battery: add support for watthour and watts sensors | @shtrophic
+#1208 | Add Gotham theme | @jrebs
+#1291 | Fix macOS deadlocks and race conditions in collector threads #1292 | @kuzmeech
+#1296 | fix: btop crash on arm cpu | @emiliopedrollo @zenofile
+#984 | Added ability to set which gpu vendors to enable | @thedustinmiller
+#1274 | added tree toggle of expand/collapse for children of process | @irabrine
+#1300 | Use right key codes to match f1 and f2 keys | @vandabbin
+#1305 | Handle missing SMC gracefully on macOS | @achille
+#1309 | Fix redraw in proc list when changing sort order | @vandabbin
+#1304 | Fix load average and GPU watts leaking past box border | @vandabbin
+#1220 | feat: respect effective cpus from cgroup | @deckstose
+#1218 | feat: display container engine | @deckstose
+#1315 | feat: raise cpp standard to c++23 | @deckstose
+d0cbaf7 | Add configuration toggle for terminal synchronization | @aristocratos
+#1306 | Implement feat Process list pausing | @vandabbin
+#1322 | flip name, command, and user sorting | @vandabbin
+#1334 | fix tty theme for pause banner | @vandabbin
+#1325 | test: add test harness with ctest | @deckstose
+#1339 | fix: skip first argument of argv | @AlvaroParker
+#1357 | feat: add --themes-dir flag | @adeci
+#1359 | fix: don't over-/underflow when parsing --update argument | @yinghao-w
+#1362 | fix segfault on musl systems | @v1cont
+#1363 | Pass only static duration strings to Config::set in Config::apply_preset | @yinghao-w
+#1366 | fix: cpu per-thread totals not reaching 100% | @Tom94
+#1367 | Fix: Align boxes when Cpu bottom and Gpu on | @yinghao-w
+#1372 | Minor fixes and improvements for NetBSD | @fraggerfox
+#1377 | Fixed GPU rendering | @TheSovietPancakes
+#1379 | Fix: Always collect GPU data when cpu_graph_lower = "Auto" | @yinghao-w
+#1393 | Fix: humanized units shortening | @yinghao-w
+#1401 | Feat: add mouse dragging of scrollbar | @yinghao-w
+#1399 | feat: add cli option to dump default config | @deckstose
+e969f43 | Added "save_config_on_exit" option to configuration | @aristocratos
+
+## v1.4.5
+
+References | Description | Author(s)
+--- | --- | ---
+#1254 | Bump bundled fmt to 12.0.0 | @deckstose
+#1242 | Enable vim movement in help menu | @botantony
+#948 | Remove reduntant symbols in tree view | @Denizantip
+#1249 | Use /sys/dev/block/MAJOR:MINOR instead of /sys/block/NAME for disk I/O | @CountBleck
+#1227 | feat: display CPU power draw & fix GPU+load avg overwriting core info | @Tom94 and @YuriiShkrobut
+4f5abbb | Fix locale issues | @aristocratos
+#1165 | Add encode and decode meters on Nvidia GPUs | @sam-kirby
+#1197 | linux: Battery Time-to-full | @RadsammyT
+#1203 | Convert ascii escape codes in mountpoint names before reading statvfs | @deckstose
+#1198 | Fix presets erroring with gpu* usage | @entropylost
+#1191 | Fix --tty/--no-tty flag having no effect | @deckstose
+
+## v1.4.4
+
+References | Description | Author(s)
+--- | --- | ---
+#1185 | Fix auto-detection of CPU temp on Ampere boards | @bexcran
+589c133 | Fixed floating_humanizer() to work correctly when numeric delimiter isn't a dot. | @aristocratos
+#1157 | Add command line option to set an inital filter | @imwints
+#1172 | Make 100ms the minimal refresh rate. Exit gracefully if integer conversion in CLI parser fails. | @imwints
+#1031 | Lock/unlock config to avoid infinite recursion | @Jacajack
+#1156 | Fix incorrect positioning and start symbol of second title introduced in 2538d89 | @xDMPx
+ffcd064 | Fix dangling reference warnings for GCC 13 and later | aristocratos
+
+## v1.4.3
+
+References | Description | Author(s)
+--- | --- | ---
+c3b225f | Revert e266ccd which broke str_to_upper() and str_to_lower() | @aristocratos
+#1137 | Enable additional checks in libc++ with the new hardening mode | @imwints
+#1135 | Remove redundant optimization flag | @imwints
+#1139 | Ignore incomplete filter regex, issue #1133 | @imwints
+
+## v1.4.2
+
+References | Description | Author(s)
+--- | --- | ---
+f1482fe | Fix process arguments appearing outside proc box by replacing ASCII control codes with blankspace, issue #1080 | @aristocratos
+#1130 | Fix problems shown by clang-tidy's performance checks | @imwints
+#1120 | Fix wrong error message and documentation of renamed option --utf-force | @t-webber @imwints
+#1128 | Flatten cmake module path | @imwints
+#1129 | CMake: Remove option to use mold  | @imwints
+#1047 | Update Terminus font link, fix typo, spelling, and grammar | @QinCai-rui
+#929 | Please clang with sanitizers | @bad-co-de
+#1126 | Fix MacOS tree-mode + aggregate memory/thread scaling issue | @xaskii
+#993 | Fix typo: Mhz -> MHz | @NyCodeGHG
+
+## v1.4.1
+
+References | Description | Author(s)
+--- | --- | ---
+#1111 #1112 | Various code fixes | @imwints
+#930 #931 | Various code fixes | @bad-co-de
+#1061 | Fixed typo | @polluks
+#1110 | Move the config parser in it's own module  | @imwints
+#1101 | Adding a menu option to show bitrates in base 10 separate from the setting to show bytes/bits in base 10 | @georgev93
+#1079 | Allow MidnightBSD to build btop using the existing freebsd support. | @laffer1
+#1098 | Use XDG_STATE_HOME to save logs | @imwints
+#1092 | Bump CMake version to 3.25 required for LINUX variable | @imwints
+#1058 | Replace brackets with arrows in net and proc box | @taha-yassine
+#1091 | Bump bundled fmt to 11.1.4 | @imwints
+#725 | cmake:  link to CMAKE_DL_LIBS | @alalazo
+#990 | Fix phoenix-night.theme marked as executable | @sertonix
+#1034 | Add Kanagawa-lotus and Kanagawa-wave themes | @philikarus
+#973 | Bump NetBSD version to 10.1 and FreeBSD version to 14.2. | @fraggerfox
+#1072 | Add dark version of adwaita theme: adwaita-dark | @k0tran
+#1036 | Resetting last selection on page navigation in optionsMenu to avoid unordered_map error | @seth-wood
+#1029 | Share the CPU name trimming code between platforms | @yarrick
+#1033 | Update Ryzen name trimming | @yarrick
+#1030 | Drop macos 12 build, add v14 and v15 | @yarrick
+#1028 | Fix cmake-macos workflow | @yarrick
+#1027 | Bump version of deprecated upload-artifact step | @yarrick
+#1025 | Update obsolete egrep call | @tywkeene
+b52069c | Fix menu crash when GPU_SUPPORT=false, issue #989 | @aristocratos
+#961 | Add 'Everforest Ligth Medium' theme | @mstuttgart
+#960 | Support intel GPUs before Gen-6 (patch from upstream) | @w8jcik
+#958 | intel_name_lookup_shim.c (get_intel_device_name): Fix SEGFAULT | @artyom-poptsov
+2e7208d | Fix rsmi_measure_pcie_speeds not saving, issue #934 | @aristocratos
+f3446ed | Show GPU Watt fractions when below 100W | @aristocratos
+
+| + more from @imwints @aristocratos
+
+Big thanks to @imwints for helping out with project maintenance, PR reviews and merging!
+
+## v1.4.0
+
+References | Description | Author(s)
+--- | --- | ---
+#703 | NetBSD Support | @fraggerfox
+#903 | Intel GPU support | @bjia56
+161e8f4 | Added warnings when toggling boxes and terminal size is to small | @aristocratos
+4210f5f | Fix missing core percentages, issue #792 | @aristocratos
+35857f8 | Various fixes for drawing GPU related information | @aristocratos
+#879 | fix divide 0 error when caculating disk usage percentage (#791) | @flylai
+#884 | fix io_graph_speeds parsing | @feihtthief
+#863 | V1 of Phoenix Night theme | @Firehawke
+3f384c0 | Fixed missing CPU core temps when too small to show core temp graphs, issues #792 #867 | @aristocratos
+97d2fb5 | Fixed missing IO graphs in IO mode, issue #867 | @aristocratos
+#840 | fix zero temp (#467) | @joske
+#850 | Fix comments (parsing) in theme files | @acidghost
+#806 | Add regex filtering | @imwints
+#836 | Fix typo in file existences check for voltage_now | @vsey
+#835 | Show time in days when remaining battery exceeds an estimation of 24h | @imwints
+#819 | (AMD Gpu) fix pwr_usage not being defined correctly during rsmi collection | @kalkafox
+#831 | macOS: fix crash if there exists a uid not associated with any user | @thecoder-001
+#796 | Fix rsmi device name buffer size | @davc0n
+#807 | Add gruvbox_light theme | @kk9uk
+#724 | Create man page for btop in Markdown | @ottok
+#734 | Include metadata in binary version output `btop --version` | @imwints
+#771 | collect: Fix reading of battery power draw on Linux | @Derppening
+
 ## v1.3.2
 
 Description | Author(s) | References

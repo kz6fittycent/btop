@@ -41,38 +41,43 @@ namespace Config {
 	extern std::unordered_map<std::string_view, int> ints;
 	extern std::unordered_map<std::string_view, int> intsTmp;
 
-	const vector<string> valid_graph_symbols = { "braille", "block", "tty" };
-	const vector<string> valid_graph_symbols_def = { "default", "braille", "block", "tty" };
-	const vector<string> valid_boxes = {
-		"cpu", "mem", "net", "proc"
-#ifdef GPU_SUPPORT
-		,"gpu0", "gpu1", "gpu2", "gpu3", "gpu4", "gpu5"
+	extern const vector<string> valid_graph_symbols;
+	extern const vector<string> valid_graph_symbols_def;
+	extern const vector<string> valid_boxes;
+
+	extern const vector<string> temp_scales;
+#ifdef __linux__
+	extern const vector<string> freq_modes;
 #endif
-		};
-	const vector<string> temp_scales = { "celsius", "fahrenheit", "kelvin", "rankine" };
 #ifdef GPU_SUPPORT
-	const vector<string> show_gpu_values = { "Auto", "On", "Off" };
+	extern const  vector<string> show_gpu_values;
 #endif
+    extern const vector<string> base_10_bitrate_values;
 	extern vector<string> current_boxes;
 	extern vector<string> preset_list;
+	extern const vector<string> disable_preset_options;
 	extern vector<string> available_batteries;
-	extern int current_preset;
+	extern std::optional<int> current_preset;
+
+	extern bool write_new;
 
 	constexpr int ONE_DAY_MILLIS = 1000 * 60 * 60 * 24;
 
 	[[nodiscard]] std::optional<std::filesystem::path> get_config_dir() noexcept;
 
-	//* Check if string only contains space separated valid names for boxes
-	bool check_boxes(const string& boxes);
+	//* Check if string only contains space separated valid names for boxes and set current_boxes
+	bool set_boxes(const string& boxes);
+
+	bool validBoxSizes(const string& boxes);
 
 	//* Toggle box and update config string shown_boxes
-	void toggle_box(const string& box);
+	bool toggle_box(const string& box);
 
 	//* Parse and setup config value presets
 	bool presetsValid(const string& presets);
 
 	//* Apply selected preset
-	void apply_preset(const string& preset);
+	bool apply_preset(const string& preset);
 
 	bool _locked(const std::string_view name);
 
@@ -124,4 +129,9 @@ namespace Config {
 
 	//* Write the config file to disk
 	void write();
+
+	auto get_log_file() -> std::optional<std::filesystem::path>;
+
+	// Write default config to an in-memory buffer
+	[[nodiscard]] auto current_config() -> std::string;
 }

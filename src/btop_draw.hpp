@@ -18,11 +18,12 @@ tab-size = 4
 
 #pragma once
 
-#include <string>
-#include <vector>
 #include <array>
-#include <unordered_map>
 #include <deque>
+#include <string>
+#include <string_view>
+#include <unordered_map>
+#include <vector>
 
 using std::array;
 using std::deque;
@@ -30,32 +31,32 @@ using std::string;
 using std::vector;
 
 namespace Symbols {
-	const string h_line				= "─";
-	const string v_line				= "│";
-	const string dotted_v_line		= "╎";
-	const string left_up			= "┌";
-	const string right_up			= "┐";
-	const string left_down			= "└";
-	const string right_down			= "┘";
-	const string round_left_up		= "╭";
-	const string round_right_up		= "╮";
-	const string round_left_down	= "╰";
-	const string round_right_down	= "╯";
-	const string title_left_down	= "┘";
-	const string title_right_down	= "└";
-	const string title_left			= "┐";
-	const string title_right		= "┌";
-	const string div_right			= "┤";
-	const string div_left			= "├";
-	const string div_up				= "┬";
-	const string div_down			= "┴";
+	extern const string h_line;
+	extern const string v_line;
+	extern const string dotted_v_line;
+	extern const string left_up;
+	extern const string right_up;
+	extern const string left_down;
+	extern const string right_down;
+	extern const string round_left_up;
+	extern const string round_right_up;
+	extern const string round_left_down;
+	extern const string round_right_down;
+	extern const string title_left_down;
+	extern const string title_right_down;
+	extern const string title_left;
+	extern const string title_right;
+	extern const string div_right;
+	extern const string div_left;
+	extern const string div_up;
+	extern const string div_down;
 
 
-	const string up = "↑";
-	const string down = "↓";
-	const string left = "←";
-	const string right = "→";
-	const string enter = "↵";
+	extern const string up;
+	extern const string down;
+	extern const string left;
+	extern const string right;
+	extern const string enter;
 }
 
 namespace Draw {
@@ -67,20 +68,21 @@ namespace Draw {
 	class TextEdit {
 		size_t pos{};
 		size_t upos{};
-		bool numeric;
+		bool numeric = false;
 	public:
 		string text;
 		TextEdit();
-		TextEdit(string text, bool numeric=false);
-		bool command(const string& key);
+		explicit TextEdit(string text, bool numeric=false);
+		bool command(const std::string_view key);
 		string operator()(const size_t limit=0);
 		void clear();
 	};
 
 	//* Create a box and return as a string
-	string createBox(const int x, const int y, const int width,
-		const int height, string line_color = "", bool fill = false,
-		const string title = "", const string title2 = "", const int num = 0);
+	string createBox(
+			const int x, const int y, const int width, const int height, string line_color = "", bool fill = false,
+			const std::string_view title = "", const std::string_view title2 = "", const int num = 0
+	);
 
 	bool update_clock(bool force = false);
 
@@ -92,7 +94,7 @@ namespace Draw {
 		array<string, 101> cache;
 	public:
 		Meter();
-		Meter(const int width, const string& color_gradient, bool invert = false);
+		Meter(const int width, string color_gradient, bool invert = false);
 
 		//* Return a string representation of the meter with given value
 		string operator()(int value);

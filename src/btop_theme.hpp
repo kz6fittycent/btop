@@ -31,6 +31,7 @@ using std::vector;
 namespace Theme {
 	extern std::filesystem::path theme_dir;
 	extern std::filesystem::path user_theme_dir;
+	extern std::filesystem::path custom_theme_dir;
 
 	//* Contains "Default" and "TTY" at indices 0 and 1, otherwise full paths to theme files
 	extern vector<string> themes;
@@ -61,9 +62,9 @@ namespace Theme {
 	inline const string& c(const string& name) { return colors.at(name); }
 
 	//* Return array of escape codes for color gradient <name>
-	inline const array<string, 101>& g(string name) { return gradients.at(name); }
+	inline const array<string, 101>& g(const string& name) { return gradients.at(name); }
 
 	//* Return array of red, green and blue in decimal for color <name>
-	inline const std::array<int, 3>& dec(string name) { return rgbs.at(name); }
+	inline const std::array<int, 3>& dec(const string& name) { return rgbs.at(name); }
 
 }

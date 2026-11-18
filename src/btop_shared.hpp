@@ -20,12 +20,16 @@ tab-size = 4
 
 #include <array>
 #include <atomic>
+#include <cstdint>
 #include <deque>
 #include <filesystem>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <tuple>
-#include <vector>
 #include <unordered_map>
+#include <vector>
+
 #include <unistd.h>
 
 // From `man 3 getifaddrs`: <net/if.h> must be included before <ifaddrs.h>
@@ -34,7 +38,7 @@ tab-size = 4
 #include <ifaddrs.h>
 // clang-format on
 
-#if defined(__FreeBSD__) || defined(__OpenBSD__)
+#if defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
 # include <kvm.h>
 #endif
 
@@ -46,6 +50,10 @@ using std::tuple;
 using std::vector;
 
 using namespace std::literals; // for operator""s
+
+namespace Tools {
+	class atomic_waiting_lock;
+}
 
 void term_resize(bool force=false);
 void banner_gen();
@@ -67,19 +75,16 @@ namespace Global {
 }
 
 namespace Runner {
-
-	extern atomic<bool> active;
+	extern Tools::atomic_waiting_lock active;
 	extern atomic<bool> reading;
 	extern atomic<bool> stopping;
 	extern atomic<bool> redraw;
 	extern atomic<bool> coreNum_reset;
-	extern pthread_t runner_id;
 	extern bool pause_output;
 	extern string debug_bg;
 
-	void run(const string& box="", bool no_update = false, bool force_redraw = false);
+	void run(const string& box = "", bool no_update = false, bool force_redraw = false);
 	void stop();
-
 }
 
 namespace Tools {
@@ -93,7 +98,7 @@ namespace Shared {
 
 	extern long coreCount, page_size, clk_tck;
 
-#if defined(__FreeBSD__) || defined(__OpenBSD__)
+#if defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
 	struct KvmDeleter {
 		void operator()(kvm_t* handle) {
 			kvm_close(handle);
@@ -103,22 +108,23 @@ namespace Shared {
 #endif
 }
 
+#if defined(GPU_SUPPORT)
 
 namespace Gpu {
-#ifdef GPU_SUPPORT
 	extern vector<string> box;
-	extern int width, height, min_width, min_height;
+	extern int width, total_height, min_width, min_height;
 	extern vector<int> x_vec, y_vec;
 	extern vector<bool> redraw;
 	extern int shown;
-	extern vector<char> shown_panels;
+	extern int count;
+	extern vector<int> shown_panels;
 	extern vector<string> gpu_names;
 	extern vector<int> gpu_b_height_offsets;
 	extern long long gpu_pwr_total_max;
 
 	extern std::unordered_map<string, deque<long long>> shared_gpu_percent; // averages, power/vram total
 
-  const array mem_names { "used"s, "free"s };
+	extern const array<string, 2> mem_names;
 
 	//* Container for process information // TODO
 	/*struct proc_info {
@@ -137,7 +143,9 @@ namespace Gpu {
 				 temp_info = true,
 				 mem_total = true,
 				 mem_used = true,
-				 pcie_txrx = true;
+				 pcie_txrx = true,
+				 encoder_utilization = true,
+				 decoder_utilization = true;
 	};
 
 	//* Per-device container for GPU info
@@ -164,6 +172,9 @@ namespace Gpu {
 		long long pcie_tx = 0; // KB/s
 		long long pcie_rx = 0;
 
+		long long encoder_utilization = 0;
+		long long decoder_utilization = 0;
+
 		gpu_info_supported supported_functions;
 
 		// vector<proc_info> graphics_processes = {}; // TODO
@@ -176,27 +187,33 @@ namespace Gpu {
 	namespace Rsmi {
 		extern bool shutdown();
 	}
+	namespace Asysfs {
+		extern bool shutdown();
+	}
+	#ifdef __APPLE__
+	namespace AppleSilicon {
+		extern bool shutdown();
+	}
+	#endif
 
 	//* Collect gpu stats and temperatures
     auto collect(bool no_update = false) -> vector<gpu_info>&;
 
 	//* Draw contents of gpu box using <gpus> as source
   	string draw(const gpu_info& gpu, unsigned long index, bool force_redraw, bool data_same);
-#else
-	struct gpu_info {
-		bool supported = false;
-	};
-#endif
 }
+
+#endif // GPU_SUPPORT
 
 namespace Cpu {
 	extern string box;
 	extern int x, y, width, height, min_width, min_height;
-	extern bool shown, redraw, got_sensors, cpu_temp_only, has_battery;
+	extern bool shown, redraw, got_sensors, cpu_temp_only, has_battery, supports_watts;
 	extern string cpuName, cpuHz;
 	extern vector<string> available_fields;
 	extern vector<string> available_sensors;
 	extern tuple<int, float, long, string> current_bat;
+	extern std::optional<std::string> container_engine;
 
 	struct cpu_info {
 		std::unordered_map<string, deque<long long>> cpu_percent = {
@@ -216,13 +233,22 @@ namespace Cpu {
 		vector<deque<long long>> temp;
 		long long temp_max = 0;
 		array<double, 3> load_avg;
+		float usage_watts = 0;
+		std::optional<std::vector<std::int32_t>> active_cpus;
 	};
 
 	//* Collect cpu stats and temperatures
 	auto collect(bool no_update = false) -> cpu_info&;
 
 	//* Draw contents of cpu box using <cpu> as source
-    string draw(const cpu_info& cpu, const vector<Gpu::gpu_info>& gpu, bool force_redraw = false, bool data_same = false);
+    string draw(
+		const cpu_info& cpu,
+#if defined(GPU_SUPPORT)
+		const vector<Gpu::gpu_info>& gpu,
+#endif
+		bool force_redraw = false,
+		bool data_same = false
+	);
 
 	//* Parse /proc/cpu info for mapping of core ids
 	auto get_core_mapping() -> std::unordered_map<int, int>;
@@ -232,6 +258,8 @@ namespace Cpu {
 
 	//* Get battery info from /sys
 	auto get_battery() -> tuple<int, float, long, string>;
+
+	string trim_name(string);
 }
 
 namespace Mem {
@@ -312,7 +340,11 @@ namespace Net {
 		int status;
 	public:
 		IfAddrsPtr() { status = getifaddrs(&ifaddr); }
-		~IfAddrsPtr() { freeifaddrs(ifaddr); }
+		~IfAddrsPtr() noexcept { freeifaddrs(ifaddr); }
+		IfAddrsPtr(const IfAddrsPtr &) = delete;
+		IfAddrsPtr& operator=(IfAddrsPtr& other) = delete;
+		IfAddrsPtr(IfAddrsPtr &&) = delete;
+		IfAddrsPtr& operator=(IfAddrsPtr&& other) = delete;
 		[[nodiscard]] constexpr auto operator()() -> struct ifaddrs* { return ifaddr; }
 		[[nodiscard]] constexpr auto get() -> struct ifaddrs* { return ifaddr; }
 		[[nodiscard]] constexpr auto get_status() const noexcept -> int { return status; };
@@ -335,35 +367,16 @@ namespace Proc {
 	extern bool shown, redraw;
 	extern int select_max;
 	extern atomic<int> detailed_pid;
-	extern int selected_pid, start, selected, collapse, expand, filter_found, selected_depth;
+	extern int selected_pid, start, selected, collapse, expand, filter_found, selected_depth, toggle_children, collapse_all;
+	extern int scroll_pos;
 	extern string selected_name;
+	extern atomic<bool> resized;
 
 	//? Contains the valid sorting options for processes
-	const vector<string> sort_vector = {
-		"pid",
-		"name",
-		"command",
-		"threads",
-		"user",
-		"memory",
-		"cpu direct",
-		"cpu lazy",
-	};
+	extern const vector<string> sort_vector;
 
 	//? Translation from process state char to explanative string
-	const std::unordered_map<char, string> proc_states = {
-		{'R', "Running"},
-		{'S', "Sleeping"},
-		{'D', "Waiting"},
-		{'Z', "Zombie"},
-		{'T', "Stopped"},
-		{'t', "Tracing"},
-		{'X', "Dead"},
-		{'x', "Dead"},
-		{'K', "Wakekill"},
-		{'W', "Unknown"},
-		{'P', "Parked"}
-	};
+	extern const std::unordered_map<char, string> proc_states;
 
 	//* Container for process information
 	struct proc_info {
@@ -382,6 +395,7 @@ namespace Proc {
 		uint64_t ppid{};
 		uint64_t cpu_s{};
 		uint64_t cpu_t{};
+		uint64_t death_time{};
 		string prefix{};        // defaults to ""
 		size_t depth{};
 		size_t tree_index{};
@@ -407,7 +421,7 @@ namespace Proc {
 	auto collect(bool no_update = false) -> vector<proc_info>&;
 
 	//* Update current selection and view, returns -1 if no change otherwise the current selection
-	int selection(const string& cmd_key);
+	int selection(const std::string_view cmd_key);
 
 	//* Draw contents of proc box using <plist> as data source
 	string draw(const vector<proc_info>& plist, bool force_redraw = false, bool data_same = false);
@@ -417,15 +431,32 @@ namespace Proc {
 		vector<tree_proc> children;
 	};
 
+	//* Change priority (nice) of pid, returns true on success otherwise false
+	bool set_priority(pid_t pid, int priority);
+
 	//* Sort vector of proc_info's
 	void proc_sorter(vector<proc_info>& proc_vec, const string& sorting, bool reverse, bool tree = false);
 
 	//* Recursive sort of process tree
-	void tree_sort(vector<tree_proc>& proc_vec, const string& sorting,
-				   bool reverse, int& c_index, const int index_max, bool collapsed = false);
+	void tree_sort(vector<tree_proc>& proc_vec, const string& sorting, bool reverse, bool paused,
+					int& c_index, const int index_max, bool collapsed = false);
+
+	auto matches_filter(const proc_info& proc, const std::string& filter) -> bool;
 
 	//* Generate process tree list
 	void _tree_gen(proc_info& cur_proc, vector<proc_info>& in_procs, vector<tree_proc>& out_procs,
 				   int cur_depth, bool collapsed, const string& filter,
 				   bool found = false, bool no_update = false, bool should_filter = false);
+
+	//* Build prefixes for tree view
+	void _collect_prefixes(tree_proc& t, bool is_last, const string &header = "");
+
+	//* Toggle collapse/expand of all tree entries
+	void toggle_tree_collapse(std::vector<proc_info>& current_procs);
+
+	//* Auto-collapse processes with many direct children when entering tree mode
+	void _auto_collapse_oversized(std::vector<proc_info>& current_procs, const bool tree_mode_change);
 }
+
+/// Detect container engine.
+auto detect_container() -> std::optional<std::string>;

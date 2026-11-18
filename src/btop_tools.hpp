@@ -26,16 +26,20 @@ tab-size = 4
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <cstdint>
+#include <ctime>
 #include <filesystem>
+#include <limits.h>
+#include <mutex>
 #include <ranges>
 #include <regex>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <tuple>
-#include <vector>
-#include <pthread.h>
-#include <limits.h>
 #include <unordered_map>
+#include <vector>
 #ifdef BTOP_DEBUG
 #include <source_location>
 #endif
@@ -47,13 +51,16 @@ tab-size = 4
 	#endif
 #endif
 
-#include "fmt/core.h"
-#include "fmt/format.h"
+#include <fmt/core.h>
+#include <fmt/format.h>
+
+#include "btop_log.hpp"
 
 using std::array;
 using std::atomic;
 using std::string;
 using std::to_string;
+using std::string_view;
 using std::tuple;
 using std::vector;
 using namespace fmt::literals;
@@ -62,31 +69,31 @@ using namespace fmt::literals;
 
 //* Collection of escape codes for text style and formatting
 namespace Fx {
-	const string e = "\x1b[";				//* Escape sequence start
-	const string b = e + "1m";				//* Bold on/off
-	const string ub = e + "22m";			//* Bold off
-	const string d = e + "2m";				//* Dark on
-	const string ud = e + "22m";			//* Dark off
-	const string i = e + "3m";				//* Italic on
-	const string ui = e + "23m";			//* Italic off
-	const string ul = e + "4m";				//* Underline on
-	const string uul = e + "24m";			//* Underline off
-	const string bl = e + "5m";				//* Blink on
-	const string ubl = e + "25m";			//* Blink off
-	const string s = e + "9m";				//* Strike/crossed-out on
-	const string us = e + "29m";			//* Strike/crossed-out on/off
+	extern const string e;	//* Escape sequence start
+	extern const string b;	//* Bold on/off
+	extern const string ub;	//* Bold off
+	extern const string d;	//* Dark on
+	extern const string ud;	//* Dark off
+	extern const string i;	//* Italic on
+	extern const string ui;	//* Italic off
+	extern const string ul;	//* Underline on
+	extern const string uul;//* Underline off
+	extern const string bl;	//* Blink on
+	extern const string ubl;//* Blink off
+	extern const string s;	//* Strike/crossed-out on
+	extern const string us;	//* Strike/crossed-out on/off
 
 	//* Reset foreground/background color and text effects
-	const string reset_base = e + "0m";
+	extern const string reset_base;
 
 	//* Reset text effects and restore theme foregrund and background color
 	extern string reset;
 
 	//* Regex for matching color, style and cursor move escape sequences
-	const std::regex escape_regex("\033\\[\\d+;?\\d?;?\\d*;?\\d*;?\\d*(m|f|s|u|C|D|A|B){1}");
+	extern const std::regex escape_regex;
 
 	//* Regex for matching only color and style escape sequences
-	const std::regex color_regex("\033\\[\\d+;?\\d?;?\\d*;?\\d*;?\\d*(m){1}");
+	extern const std::regex color_regex;
 
 	//* Return a string with all colors and text styling removed
 	inline string uncolor(const string& s) { return std::regex_replace(s, color_regex, ""); }
@@ -125,19 +132,19 @@ namespace Term {
 	extern atomic<int> height;
 	extern string fg, bg, current_tty;
 
-	const string hide_cursor = Fx::e + "?25l";
-	const string show_cursor = Fx::e + "?25h";
-	const string alt_screen = Fx::e + "?1049h";
-	const string normal_screen = Fx::e + "?1049l";
-	const string clear = Fx::e + "2J" + Fx::e + "0;0f";
-	const string clear_end = Fx::e + "0J";
-	const string clear_begin = Fx::e + "1J";
-	const string mouse_on = Fx::e + "?1002h" + Fx::e + "?1015h" + Fx::e + "?1006h"; //? Enable reporting of mouse position on click and release
-	const string mouse_off = Fx::e + "?1002l" + Fx::e + "?1015l" + Fx::e + "?1006l";
-	const string mouse_direct_on = Fx::e + "?1003h"; //? Enable reporting of mouse position at any movement
-	const string mouse_direct_off = Fx::e + "?1003l";
-	const string sync_start = Fx::e + "?2026h"; //? Start of terminal synchronized output
-	const string sync_end = Fx::e + "?2026l"; //? End of terminal synchronized output
+	extern const string hide_cursor;
+	extern const string show_cursor;
+	extern const string alt_screen;
+	extern const string normal_screen;
+	extern const string clear;
+	extern const string clear_end;
+	extern const string clear_begin;
+	extern const string mouse_on; //? Enable reporting of mouse position on click and release
+	extern const string mouse_off;
+	extern const string mouse_direct_on; //? Enable reporting of mouse position at any movement
+	extern const string mouse_direct_off;
+	extern const string sync_start; //? Start of terminal synchronized output
+	extern const string sync_end; //? End of terminal synchronized output
 
 	//* Returns true if terminal has been resized and updates width and height
 	bool refresh(bool only_check=false);
@@ -152,35 +159,6 @@ namespace Term {
 	void restore();
 }
 
-//* Simple logging implementation
-namespace Logger {
-	const vector<string> log_levels = {
-		"DISABLED",
-		"ERROR",
-		"WARNING",
-		"INFO",
-		"DEBUG",
-	};
-	extern std::filesystem::path logfile;
-
-	enum Level : size_t {
-		DISABLED = 0,
-		ERROR = 1,
-		WARNING = 2,
-		INFO = 3,
-		DEBUG = 4,
-	};
-
-	//* Set log level, valid arguments: "DISABLED", "ERROR", "WARNING", "INFO" and "DEBUG"
-	void set(const string& level);
-
-	void log_write(const Level level, const string& msg);
-	inline void error(const string msg) { log_write(ERROR, msg); }
-	inline void warning(const string msg) { log_write(WARNING, msg); }
-	inline void info(const string msg) { log_write(INFO, msg); }
-	inline void debug(const string msg) { log_write(DEBUG, msg); }
-}
-
 //? --------------------------------------------------- FUNCTIONS -----------------------------------------------------
 
 namespace Tools {
@@ -188,15 +166,15 @@ namespace Tools {
 
 	class MyNumPunct : public std::numpunct<char> {
 	protected:
-		virtual char do_thousands_sep() const { return '\''; }
-		virtual std::string do_grouping() const { return "\03"; }
+		virtual char do_thousands_sep() const override { return '\''; }
+		virtual std::string do_grouping() const override { return "\03"; }
 	};
 
-	size_t wide_ulen(const string& str);
-	size_t wide_ulen(const std::wstring& w_str);
+	size_t wide_ulen(const std::string_view str);
+	size_t wide_ulen(const vector<wchar_t> w_str);
 
 	//* Return number of UTF8 characters in a string (wide=true for column size needed on terminal)
-	inline size_t ulen(const string& str, bool wide = false) {
+	inline size_t ulen(const std::string_view str, bool wide = false) {
 		return (wide ? wide_ulen(str) : std::ranges::count_if(str, [](char c) { return (static_cast<unsigned char>(c) & 0xC0) != 0x80; }));
 	}
 
@@ -209,20 +187,23 @@ namespace Tools {
 	//* Replace <from> in <str> with <to> and return new string
 	string s_replace(const string& str, const string& from, const string& to);
 
-	//* Capatilize <str>
+	//* Replace ascii control characters with <replacement> in <str> and return new string
+	string replace_ascii_control(string str, const char replacement = ' ');
+
+	//* Capitalize <str>
 	inline string capitalize(string str) {
 		str.at(0) = toupper(str.at(0));
 		return str;
 	}
 
 	//* Return <str> with only uppercase characters
-	inline string str_to_upper(string str) {
+	inline auto str_to_upper(string str) {
 		std::ranges::for_each(str, [](auto& c) { c = ::toupper(c); } );
 		return str;
 	}
 
 	//* Return <str> with only lowercase characters
-	inline string str_to_lower(string str) {
+	inline auto str_to_lower(string str) {
 		std::ranges::for_each(str, [](char& c) { c = ::tolower(c); } );
 		return str;
 	}
@@ -233,14 +214,8 @@ namespace Tools {
 		return std::ranges::find(vec, find_val) != vec.end();
 	}
 
-	//* Check if string <str> contains value <find_val>
-	template <typename T>
-	inline bool s_contains(const string& str, const T& find_val) {
-		return str.find(find_val) != string::npos;
-	}
-
 	//* Check if string <str> contains string <find_val>, while ignoring case
-	inline bool s_contains_ic(const string& str, const string& find_val) {
+	inline bool s_contains_ic(const std::string_view str, const std::string_view find_val) {
 		auto it = std::search(
 			str.begin(), str.end(),
 			find_val.begin(), find_val.end(),
@@ -276,34 +251,50 @@ namespace Tools {
 		return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
 	}
 
+	//* Return uptime in microseconds, excluding time spent in system suspend
+	inline uint64_t uptime_micros() {
+		struct timespec ts{};
+#ifdef __APPLE__
+		if (clock_gettime(CLOCK_UPTIME_RAW, &ts) != 0) return 0;
+#elif defined(__FreeBSD__)
+		if (clock_gettime(CLOCK_UPTIME, &ts) != 0) return 0;
+#else
+		if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
+#endif
+		return static_cast<uint64_t>(ts.tv_sec) * 1'000'000 + static_cast<uint64_t>(ts.tv_nsec) / 1000;
+	}
+
 	//* Check if a string is a valid bool value
-	inline bool isbool(const string& str) {
+	inline bool isbool(const std::string_view str) {
 		return is_in(str, "true", "false", "True", "False");
 	}
 
 	//* Convert string to bool, returning any value not equal to "true" or "True" as false
-	inline bool stobool(const string& str) {
+	inline bool stobool(const std::string_view str) {
 		return is_in(str, "true", "True");
 	}
 
 	//* Check if a string is a valid integer value (only positive)
-	inline bool isint(const string& str) {
-		return all_of(str.begin(), str.end(), ::isdigit);
+	constexpr bool isint(const std::string_view str) {
+		return std::ranges::all_of(str, ::isdigit);
 	}
 
 	//* Left-trim <t_str> from <str> and return new string
-	string ltrim(const string& str, const string& t_str = " ");
+	string_view ltrim(string_view str, string_view t_str = " ");
 
 	//* Right-trim <t_str> from <str> and return new string
-	string rtrim(const string& str, const string& t_str = " ");
+	string_view rtrim(string_view str, string_view t_str = " ");
 
 	//* Left/right-trim <t_str> from <str> and return new string
-	inline string trim(const string& str, const string& t_str = " ") {
+	inline string_view trim(string_view str, string_view t_str = " ") {
 		return ltrim(rtrim(str, t_str), t_str);
 	}
 
 	//* Split <string> at all occurrences of <delim> and return as vector of strings
-	auto ssplit(const string& str, const char& delim = ' ') -> vector<string>;
+	constexpr auto ssplit(std::string_view str, char delim = ' ') {
+		return str | std::views::split(delim) | std::views::filter([](auto&& range) { return !std::ranges::empty(range); }) |
+			   std::ranges::to<std::vector<std::string>>();
+	}
 
 	//* Put current thread to sleep for <ms> milliseconds
 	inline void sleep_ms(const size_t& ms) {
@@ -331,9 +322,9 @@ namespace Tools {
 	string sec_to_dhms(size_t seconds, bool no_days = false, bool no_seconds = false);
 
 	//* Scales up in steps of 1024 to highest positive value unit and returns string with unit suffixed
-	//* bit=True or defaults to bytes
+	//* bit=true or defaults to bytes
 	//* start=int to set 1024 multiplier starting unit
-	//* short=True always returns 0 decimals and shortens unit to 1 character
+	//* shorten=true shortens value to at most 3 characters and shortens unit to 1 character
 	string floating_humanizer(uint64_t value, bool shorten = false, size_t start = 0, bool bit = false, bool per_second = false);
 
 	//* Add std::string operator * : Repeat string <str> <n> number of times
@@ -342,19 +333,19 @@ namespace Tools {
 	template <typename K, typename T>
 #ifdef BTOP_DEBUG
 	const T& safeVal(const std::unordered_map<K, T>& map, const K& key, const T& fallback = T{}, std::source_location loc = std::source_location::current()) {
-		if (map.contains(key)) {
-			return map.at(key);
+		if (auto it = map.find(key); it != map.end()) {
+			return it->second;
 		} else {
-			Logger::error(fmt::format("safeVal() called with invalid key: [{}] in file: {} on line: {}", key, loc.file_name(), loc.line()));
+			Logger::error("safeVal() called with invalid key: [{}] in file: {} on line: {}", key, loc.file_name(), loc.line());
 			return fallback;
 		}
 	};
 #else
 	const T& safeVal(const std::unordered_map<K, T>& map, const K& key, const T& fallback = T{}) {
-		if (map.contains(key)) {
-			return map.at(key);
+		if (auto it = map.find(key); it != map.end()) {
+			return it->second;
 		} else {
-			Logger::error(fmt::format("safeVal() called with invalid key: [{}] (Compile btop with DEBUG=true for more extensive logging!)", key));
+			Logger::error("safeVal() called with invalid key: [{}] (Compile btop with DEBUG=true for more extensive logging!)", key);
 			return fallback;
 		}
 	};
@@ -364,18 +355,18 @@ namespace Tools {
 #ifdef BTOP_DEBUG
 	const T& safeVal(const std::vector<T>& vec, const size_t& index, const T& fallback = T{}, std::source_location loc = std::source_location::current()) {
 		if (index < vec.size()) {
-			return vec.at(index);
+			return vec[index];
 		} else {
-			Logger::error(fmt::format("safeVal() called with invalid index: [{}] in file: {} on line: {}", index, loc.file_name(), loc.line()));
+			Logger::error("safeVal() called with invalid index: [{}] in file: {} on line: {}", index, loc.file_name(), loc.line());
 			return fallback;
 		}
 	};
 #else
 	const T& safeVal(const std::vector<T>& vec, const size_t& index, const T& fallback = T{}) {
 		if (index < vec.size()) {
-			return vec.at(index);
+			return vec[index];
 		} else {
-			Logger::error(fmt::format("safeVal() called with invalid index: [{}] (Compile btop with DEBUG=true for more extensive logging!)", index));
+			Logger::error("safeVal() called with invalid index: [{}] (Compile btop with DEBUG=true for more extensive logging!)", index);
 			return fallback;
 		}
 	};
@@ -389,30 +380,47 @@ namespace Tools {
 	string hostname();
 	string username();
 
-	static inline void busy_wait (void) {
-	#if defined __i386__ || defined __x86_64__
-		__builtin_ia32_pause();
-	#elif defined __ia64__
-		__asm volatile("hint @pause" : : : "memory");
-	#elif defined __sparc__ && (defined __arch64__ || defined __sparc_v9__)
-		__asm volatile("membar #LoadLoad" : : : "memory");
-	#else
-		__asm volatile("" : : : "memory");
-	#endif
-	}
-
 	void atomic_wait(const atomic<bool>& atom, bool old = true) noexcept;
-
-	void atomic_wait_for(const atomic<bool>& atom, bool old = true, const uint64_t wait_ms = 0) noexcept;
 
 	//* Sets atomic<bool> to true on construct, sets to false on destruct
 	class atomic_lock {
 		atomic<bool>& atom;
-		bool not_true{};
 	public:
-		atomic_lock(atomic<bool>& atom, bool wait = false);
-		~atomic_lock();
+		explicit atomic_lock(atomic<bool>& atom, bool wait = false);
+		~atomic_lock() noexcept;
+		atomic_lock(const atomic_lock& other) = delete;
+		atomic_lock& operator=(const atomic_lock& other) = delete;
+		atomic_lock(atomic_lock&& other) = delete;
+		atomic_lock& operator=(atomic_lock&& other) = delete;
 	};
+
+	class atomic_waiting_lock {
+		bool value{};
+		mutable std::mutex mtx;
+		mutable std::condition_variable cv;
+
+	public:
+		class guard {
+			atomic_waiting_lock& atom;
+		public:
+			explicit guard(atomic_waiting_lock& atom, bool wait = false);
+			~guard() noexcept;
+			guard(const guard& other) = delete;
+			guard& operator=(const guard& other) = delete;
+			guard(guard&& other) = delete;
+			guard& operator=(guard&& other) = delete;
+		};
+
+		void store(bool value) noexcept;
+		void wait(bool old = true) const noexcept;
+		void wait_for(bool old, uint64_t wait_ms) const noexcept;
+		[[nodiscard]] guard lock(bool wait = false);
+		explicit operator bool() const noexcept;
+	};
+
+	void atomic_wait(const atomic_waiting_lock& atom, bool old = true) noexcept;
+
+	void atomic_wait_for(const atomic_waiting_lock& atom, bool old = true, const uint64_t wait_ms = 0);
 
 	//* Read a complete file and return as a string
 	string readfile(const std::filesystem::path& path, const string& fallback = "");
@@ -433,13 +441,16 @@ namespace Tools {
 		bool running{};
 		std::locale custom_locale = std::locale(std::locale::classic(), new Tools::MyNumPunct);
 		vector<string> report_buffer{};
-	public:
 		string name{};
 		bool delayed_report{};
-		Logger::Level log_level = Logger::DEBUG;
+	public:
 		DebugTimer() = default;
-		DebugTimer(const string name, bool start = true, bool delayed_report = true);
+		explicit DebugTimer(string name, bool start = true, bool delayed_report = true);
 		~DebugTimer();
+		DebugTimer(const DebugTimer& other) = delete;
+		DebugTimer& operator=(const DebugTimer& other) = delete;
+		DebugTimer(DebugTimer&& other) = delete;
+		DebugTimer& operator=(DebugTimer&& other) = delete;
 
 		void start();
 		void stop(bool report = true);
@@ -453,6 +464,3 @@ namespace Tools {
 	};
 
 }
-
-
-

@@ -18,10 +18,11 @@ tab-size = 4
 
 #pragma once
 
-#include <string>
 #include <atomic>
-#include <vector>
 #include <bitset>
+#include <string>
+#include <string_view>
+#include <vector>
 
 #include "btop_input.hpp"
 
@@ -61,16 +62,18 @@ namespace Menu {
 			Select
 		};
 		msgBox();
-		msgBox(int width, int boxtype, vector<string> content, string title);
+		msgBox(int width, int boxtype, const vector<string>& content, std::string_view title);
 
 		//? Draw and return box as a string
 		string operator()();
 
 		//? Process input and returns value from enum Ret
-		int input(string key);
+		int input(const string& key);
 
 		//? Clears content vector and private strings
 		void clear();
+        int getX() const { return x; }
+        int getY() const { return y; }
 	};
 
 	extern bitset<8> menuMask;
@@ -83,11 +86,12 @@ namespace Menu {
 		SignalReturn,
 		Options,
 		Help,
+	    Renice,
 		Main
 	};
 
 	//* Handles redirection of input for menu functions and handles return codes
-	void process(string key="");
+	void process(const std::string_view key = "");
 
 	//* Show a menu from enum Menu::Menus
 	void show(int menu, int signal=-1);

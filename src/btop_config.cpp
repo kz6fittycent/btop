@@ -18,15 +18,22 @@ tab-size = 4
 
 #include <array>
 #include <atomic>
+#include <filesystem>
+#include <fmt/format.h>
 #include <fstream>
+#include <iterator>
+#include <locale>
+#include <optional>
 #include <ranges>
 #include <string_view>
 #include <utility>
 
+#include <fmt/base.h>
 #include <fmt/core.h>
 #include <sys/statvfs.h>
 
 #include "btop_config.hpp"
+#include "btop_log.hpp"
 #include "btop_shared.hpp"
 #include "btop_tools.hpp"
 
@@ -39,6 +46,24 @@ namespace rng = std::ranges;
 
 using namespace std::literals;
 using namespace Tools;
+
+const vector<string> Config::valid_graph_symbols = { "braille", "block", "tty" };
+const vector<string> Config::valid_graph_symbols_def = { "default", "braille", "block", "tty" };
+const vector<string> Config::valid_boxes = {
+	"cpu", "mem", "net", "proc"
+#ifdef GPU_SUPPORT
+	,"gpu0", "gpu1", "gpu2", "gpu3", "gpu4", "gpu5"
+#endif
+};
+const vector<string> Config::temp_scales = { "celsius", "fahrenheit", "kelvin", "rankine" };
+#ifdef __linux__
+const vector<string> Config::freq_modes = { "first", "range", "lowest", "highest", "average" };
+#endif
+#ifdef GPU_SUPPORT
+const vector<string> Config::show_gpu_values = { "Auto", "On", "Off" };
+#endif
+const vector<string> Config::base_10_bitrate_values = { "Auto", "True", "False" };
+const vector<string> Config::disable_preset_options = { "Off", "Default", "Custom", "All" };
 
 //* Functions and variables for reading and writing the btop config file
 namespace Config {
@@ -58,6 +83,12 @@ namespace Config {
 		{"force_tty", 			"#* Set to true to force tty mode regardless if a real tty has been detected or not.\n"
 								"#* Will force 16-color mode and TTY theme, set all graph symbols to \"tty\" and swap out other non tty friendly symbols."},
 
+		{"disable_presets",		"#* Option to disable presets. Either the default preset, custom presets, or all presets.\n"
+								"#* \"Off\" All presets are enabled.\n"
+								"#* \"Default\" preset is disabled."
+								"#* \"Custom\" presets are disabled."
+								"#* \"All\" presets are disabled."},
+
 		{"presets",				"#* Define presets for the layout of the boxes. Preset 0 is always all boxes shown with default settings. Max 9 presets.\n"
 								"#* Format: \"box_name:P:G,box_name:P:G\" P=(0 or 1) for alternate positions, G=graph symbol to use for box.\n"
 								"#* Use whitespace \" \" as separator between different presets.\n"
@@ -66,7 +97,10 @@ namespace Config {
 		{"vim_keys",			"#* Set to True to enable \"h,j,k,l,g,G\" keys for directional control in lists.\n"
 								"#* Conflicting keys for h:\"help\" and k:\"kill\" is accessible while holding shift."},
 
+		{"disable_mouse", "#* Disable all mouse events."},
 		{"rounded_corners",		"#* Rounded corners on boxes, is ignored if TTY mode is ON."},
+
+		{"terminal_sync", 		"#* Use terminal synchronized output sequences to reduce flickering on supported terminals."},
 
 		{"graph_symbol", 		"#* Default symbols to use for graph creation, \"braille\", \"block\" or \"tty\".\n"
 								"#* \"braille\" offers the highest resolution but might not be included in all fonts.\n"
@@ -111,7 +145,14 @@ namespace Config {
 
 		{"proc_filter_kernel",  "#* (Linux) Filter processes tied to the Linux kernel(similar behavior to htop)."},
 
+		{"proc_follow_detailed",	"#* Should the process list follow the selected process when detailed view is open."},
+
 		{"proc_aggregate",		"#* In tree-view, always accumulate child process resources in the parent process."},
+
+		{"proc_tree_auto_collapse", "#* In tree-view, auto-collapse processes with this many or more direct children when\n"
+									"#* entering tree mode. 0 to disable. Useful for collapsing multi-process apps like browsers."},
+
+		{"keep_dead_proc_usage", "#* Should cpu and memory usage display be preserved for dead processes when paused."},
 
 		{"cpu_graph_upper", 	"#* Sets the CPU stat shown in upper half of the CPU graph, \"total\" is always available.\n"
 								"#* Select from a list of detected attributes from the options menu."},
@@ -129,6 +170,8 @@ namespace Config {
 
 		{"show_uptime", 		"#* Shows the system uptime in the CPU box."},
 
+		{"show_cpu_watts",		"#* Shows the CPU package current power consumption in watts. Requires running `make setcap` or `make setuid` or running with sudo."},
+
 		{"check_temp", 			"#* Show cpu temperature."},
 
 		{"cpu_sensor", 			"#* Which sensor to use for cpu temperature, use options menu to select from list of available sensors."},
@@ -145,7 +188,9 @@ namespace Config {
 		{"base_10_sizes",		"#* Use base 10 for bits/bytes sizes, KB = 1000 instead of KiB = 1024."},
 
 		{"show_cpu_freq", 		"#* Show CPU frequency."},
-
+	#ifdef __linux__
+		{"freq_mode",				"#* How to calculate CPU frequency, available values: \"first\", \"range\", \"lowest\", \"highest\" and \"average\"."},
+	#endif
 		{"clock_format", 		"#* Draw a clock at top of screen, formatting according to strftime, empty string to disable.\n"
 								"#* Special formatting: /host = hostname | /user = username | /uptime = system uptime"},
 
@@ -154,7 +199,7 @@ namespace Config {
 		{"custom_cpu_name", 	"#* Custom cpu model name, empty string to disable."},
 
 		{"disks_filter", 		"#* Optional filter for shown disks, should be full path of a mountpoint, separate multiple values with whitespace \" \".\n"
-								"#* Begin line with \"exclude=\" to change to exclude filter, otherwise defaults to \"most include\" filter. Example: disks_filter=\"exclude=/boot /home/user\"."},
+									"#* Only disks matching the filter will be shown. Prepend exclude= to only show disks not matching the filter. Examples: disks_filter=\"/boot /home/user\", disks_filter=\"exclude=/boot /home/user\""},
 
 		{"mem_graphs", 			"#* Show graphs instead of meters for memory values."},
 
@@ -185,6 +230,8 @@ namespace Config {
 		{"io_graph_speeds", 	"#* Set the top speed for the io graphs in MiB/s (100 by default), use format \"mountpoint:speed\" separate disks with whitespace \" \".\n"
 								"#* Example: \"/mnt/media:100 /:20 /boot:1\"."},
 
+		{"swap_upload_download", "#* Swap the positions of the upload and download speed graphs. When true, upload will be on top."},
+
 		{"net_download", 		"#* Set fixed values for network graphs in Mebibits. Is only used if net_auto is also set to False."},
 
 		{"net_upload", ""},
@@ -195,21 +242,25 @@ namespace Config {
 
 		{"net_iface", 			"#* Starts with the Network Interface specified here."},
 
+	    {"base_10_bitrate",     "#* \"True\" shows bitrates in base 10 (Kbps, Mbps). \"False\" shows bitrates in binary sizes (Kibps, Mibps, etc.). \"Auto\" uses base_10_sizes."},
+
 		{"show_battery", 		"#* Show battery stats in top right if battery is present."},
 
 		{"selected_battery",	"#* Which battery to use if multiple are present. \"Auto\" for auto detection."},
 
 		{"show_battery_watts",	"#* Show power stats of battery next to charge indicator."},
 
-		{"log_level", 			"#* Set loglevel for \"~/.config/btop/btop.log\" levels are: \"ERROR\" \"WARNING\" \"INFO\" \"DEBUG\".\n"
+		{"log_level", 			"#* Set loglevel for \"~/.local/state/btop.log\" levels are: \"ERROR\" \"WARNING\" \"INFO\" \"DEBUG\".\n"
 								"#* The level set includes all lower levels, i.e. \"DEBUG\" will show all logging info."},
+		{"save_config_on_exit",  "#* Automatically save current settings to config file on exit."},
 	#ifdef GPU_SUPPORT
 
 		{"nvml_measure_pcie_speeds",
 								"#* Measure PCIe throughput on NVIDIA cards, may impact performance on certain cards."},
-
+		{"rsmi_measure_pcie_speeds",
+								"#* Measure PCIe throughput on AMD cards, may impact performance on certain cards."},
 		{"gpu_mirror_graph",	"#* Horizontally mirror the GPU graph."},
-
+		{"shown_gpus",			"#* Set which GPU vendors to show. Available values are \"nvidia amd intel apple\""},
 		{"custom_gpu_name0",	"#* Custom gpu0 model name, empty string to disable."},
 		{"custom_gpu_name1",	"#* Custom gpu1 model name, empty string to disable."},
 		{"custom_gpu_name2",	"#* Custom gpu2 model name, empty string to disable."},
@@ -223,6 +274,7 @@ namespace Config {
 		{"color_theme", "Default"},
 		{"shown_boxes", "cpu mem net proc"},
 		{"graph_symbol", "braille"},
+		{"disable_presets", "Off"},
 		{"presets", "cpu:1:default,proc:0:default cpu:0:default,mem:0:default,net:0:default cpu:0:block,net:0:tty"},
 		{"graph_symbol_cpu", "default"},
 		{"graph_symbol_gpu", "default"},
@@ -236,11 +288,15 @@ namespace Config {
 		{"selected_battery", "Auto"},
 		{"cpu_core_map", ""},
 		{"temp_scale", "celsius"},
+	#ifdef __linux__
+		{"freq_mode", "first"},
+	#endif
 		{"clock_format", "%X"},
 		{"custom_cpu_name", ""},
 		{"disks_filter", ""},
 		{"io_graph_speeds", ""},
 		{"net_iface", ""},
+		{"base_10_bitrate", "Auto"},
 		{"log_level", "WARNING"},
 		{"proc_filter", ""},
 		{"proc_command", ""},
@@ -252,7 +308,8 @@ namespace Config {
 		{"custom_gpu_name3", ""},
 		{"custom_gpu_name4", ""},
 		{"custom_gpu_name5", ""},
-		{"show_gpu_info", "Auto"}
+		{"show_gpu_info", "Auto"},
+		{"shown_gpus", "nvidia amd intel apple"}
 	#endif
 	};
 	std::unordered_map<std::string_view, string> stringsTmp;
@@ -275,6 +332,7 @@ namespace Config {
 		{"cpu_single_graph", false},
 		{"cpu_bottom", false},
 		{"show_uptime", true},
+		{"show_cpu_watts", true},
 		{"check_temp", true},
 		{"show_coretemp", true},
 		{"show_cpu_freq", true},
@@ -290,6 +348,7 @@ namespace Config {
 		{"zfs_hide_datasets", false},
 		{"show_io_stat", true},
 		{"io_mode", false},
+		{"swap_upload_download", false},
 		{"base_10_sizes", false},
 		{"io_graph_combined", false},
 		{"net_auto", true},
@@ -304,10 +363,21 @@ namespace Config {
 		{"show_detailed", false},
 		{"proc_filtering", false},
 		{"proc_aggregate", false},
+		{"pause_proc_list", false},
+		{"keep_dead_proc_usage", false},
+		{"proc_banner_shown", false},
+		{"proc_follow_detailed", true},
+		{"follow_process", false},
+		{"update_following", false},
+		{"should_selection_return_to_followed", false},
 	#ifdef GPU_SUPPORT
 		{"nvml_measure_pcie_speeds", true},
+		{"rsmi_measure_pcie_speeds", true},
 		{"gpu_mirror_graph", true},
 	#endif
+		{"terminal_sync", true},
+		{"save_config_on_exit", true},
+		{"disable_mouse", false},
 	};
 	std::unordered_map<std::string_view, bool> boolsTmp;
 
@@ -315,12 +385,16 @@ namespace Config {
 		{"update_ms", 2000},
 		{"net_download", 100},
 		{"net_upload", 100},
+		{"proc_tree_auto_collapse", 0},
 		{"detailed_pid", 0},
+		{"restore_detailed_pid", 0},
 		{"selected_pid", 0},
+		{"followed_pid", 0},
 		{"selected_depth", 0},
 		{"proc_start", 0},
 		{"proc_selected", 0},
 		{"proc_last_selected", 0},
+		{"proc_followed", 0},
 	};
 	std::unordered_map<std::string_view, int> intsTmp;
 
@@ -397,7 +471,7 @@ namespace Config {
 
 	vector<string> current_boxes;
 	vector<string> preset_list = {"cpu:0:default,mem:0:default,net:0:default,proc:0:default"};
-	int current_preset = -1;
+	std::optional<int> current_preset;
 
 	bool presetsValid(const string& presets) {
 		vector<string> new_presets = {preset_list.at(0)};
@@ -438,7 +512,7 @@ namespace Config {
 	}
 
 	//* Apply selected preset
-	void apply_preset(const string& preset) {
+	bool apply_preset(const string& preset) {
 		string boxes;
 
 		for (const auto& box : ssplit(preset, ',')) {
@@ -449,18 +523,30 @@ namespace Config {
 
 		auto min_size = Term::get_min_size(boxes);
 		if (Term::width < min_size.at(0) or Term::height < min_size.at(1)) {
-			return;
+			return false;
 		}
 
 		for (const auto& box : ssplit(preset, ',')) {
 			const auto& vals = ssplit(box, ':');
-			if (vals.at(0) == "cpu") set("cpu_bottom", (vals.at(1) == "0" ? false : true));
-			else if (vals.at(0) == "mem") set("mem_below_net", (vals.at(1) == "0" ? false : true));
-			else if (vals.at(0) == "proc") set("proc_left", (vals.at(1) == "0" ? false : true));
-			set("graph_symbol_" + vals.at(0), vals.at(2));
+			if (vals.at(0) == "cpu") {
+				set("cpu_bottom", (vals.at(1) != "0"));
+			} else if (vals.at(0) == "mem") {
+				set("mem_below_net", (vals.at(1) != "0"));
+			} else if (vals.at(0) == "proc") {
+				set("proc_left", (vals.at(1) != "0"));
+			}
+			if (vals.at(0).starts_with("gpu")) {
+				set("graph_symbol_gpu", vals.at(2));
+			} else {
+				set(strings.find("graph_symbol_" + vals.at(0))->first, vals.at(2));
+			}
 		}
 
-		if (check_boxes(boxes)) set("shown_boxes", boxes);
+		if (set_boxes(boxes)) {
+			set("shown_boxes", boxes);
+			return true;
+		}
+		return false;
 	}
 
 	void lock() {
@@ -494,10 +580,21 @@ namespace Config {
 		else if (name == "update_ms" and i_value > ONE_DAY_MILLIS)
 			validError = fmt::format("Config value update_ms set too high (>{}).", ONE_DAY_MILLIS);
 
+		else if (name == "proc_tree_auto_collapse" and i_value < 0)
+			validError = "Config value proc_tree_auto_collapse must be >= 0.";
+
+		else if (name == "proc_tree_auto_collapse" and i_value > 10000)
+			validError = "Config value proc_tree_auto_collapse set too high (>10000).";
+
 		else
 			return true;
 
 		return false;
+	}
+
+	bool validBoxSizes(const string& boxes) {
+		auto min_size = Term::get_min_size(boxes);
+		return (Term::width >= min_size.at(0) and Term::height >= min_size.at(1));
 	}
 
 	bool stringValid(const std::string_view name, const string& value) {
@@ -510,8 +607,16 @@ namespace Config {
 		else if (name.starts_with("graph_symbol_") and (value != "default" and not v_contains(valid_graph_symbols, value)))
 			validError = fmt::format("Invalid graph symbol identifier for {}: {}", name, value);
 
-		else if (name == "shown_boxes" and not Global::init_conf and not value.empty() and not check_boxes(value))
-			validError = "Invalid box name(s) in shown_boxes!";
+		else if (name == "shown_boxes" and not Global::init_conf) {
+			if (value.empty())
+				validError = "No boxes selected!";
+			else if (not validBoxSizes(value))
+				validError = "Terminal too small to display entered boxes!";
+			else if (not set_boxes(value))
+				validError = "Invalid box name(s) in shown_boxes!";
+			else
+				return true;
+		}
 
 	#ifdef GPU_SUPPORT
 		else if (name == "show_gpu_info" and not v_contains(show_gpu_values, value))
@@ -563,12 +668,12 @@ namespace Config {
 	}
 
 	string getAsString(const std::string_view name) {
-		if (bools.contains(name))
-			return (bools.at(name) ? "True" : "False");
-		else if (ints.contains(name))
-			return to_string(ints.at(name));
-		else if (strings.contains(name))
-			return strings.at(name);
+		if (auto it = bools.find(name); it != bools.end())
+			return it->second ? "True" : "False";
+		if (auto it = ints.find(name); it != ints.end())
+			return to_string(it->second);
+		if (auto it = strings.find(name); it != strings.end())
+			return it->second;
 		return "";
 	}
 
@@ -609,21 +714,21 @@ namespace Config {
 			boolsTmp.clear();
 		}
 		catch (const std::exception& e) {
-			Global::exit_error_msg = "Exception during Config::unlock() : " + string{e.what()};
+			Global::exit_error_msg = fmt::format("Exception during Config::unlock() : {}", e.what());
 			clean_quit(1);
 		}
 
 		locked = false;
 	}
 
-	bool check_boxes(const string& boxes) {
+	bool set_boxes(const string& boxes) {
 		auto new_boxes = ssplit(boxes);
 		for (auto& box : new_boxes) {
 			if (not v_contains(valid_boxes, box)) return false;
 		#ifdef GPU_SUPPORT
 			if (box.starts_with("gpu")) {
-				size_t gpu_num = stoi(box.substr(3)) + 1;
-				if (std::cmp_greater(gpu_num, Gpu::gpu_names.size())) return false;
+				int gpu_num = stoi(box.substr(3)) + 1;
+				if (gpu_num > Gpu::count) return false;
 			}
 		#endif
 		}
@@ -631,7 +736,7 @@ namespace Config {
 		return true;
 	}
 
-	void toggle_box(const string& box) {
+	bool toggle_box(const string& box) {
 		auto old_boxes = current_boxes;
 		auto box_pos = rng::find(current_boxes, box);
 		if (box_pos == current_boxes.end())
@@ -649,10 +754,11 @@ namespace Config {
 
 		if (Term::width < min_size.at(0) or Term::height < min_size.at(1)) {
 			current_boxes = old_boxes;
-			return;
+			return false;
 		}
 
 		Config::set("shown_boxes", new_boxes);
+		return true;
 	}
 
 	void load(const fs::path& conf_file, vector<string>& load_warnings) {
@@ -670,9 +776,10 @@ namespace Config {
 		std::ifstream cread(conf_file);
 		if (cread.good()) {
 			vector<string> valid_names;
-			for (auto &n : descriptions)
+			valid_names.reserve(descriptions.size());
+			for (const auto &n : descriptions)
 				valid_names.push_back(n[0]);
-			if (string v_string; cread.peek() != '#' or (getline(cread, v_string, '\n') and not s_contains(v_string, Global::Version)))
+			if (string v_string; cread.peek() != '#' or (getline(cread, v_string, '\n') and not v_string.contains(Global::Version)))
 				write_new = true;
 			while (not cread.eof()) {
 				cread >> std::ws;
@@ -731,19 +838,64 @@ namespace Config {
 		Logger::debug("Writing new config file");
 		if (geteuid() != Global::real_uid and seteuid(Global::real_uid) != 0) return;
 		std::ofstream cwrite(conf_file, std::ios::trunc);
+		// TODO: Report error when stream is in a bad state.
 		if (cwrite.good()) {
-			cwrite << "#? Config file for btop v. " << Global::Version << "\n";
-			for (auto [name, description] : descriptions) {
-				cwrite << "\n" << (description.empty() ? "" : description + "\n")
-						<< name << " = ";
-				if (strings.contains(name))
-					cwrite << "\"" << strings.at(name) << "\"";
-				else if (ints.contains(name))
-					cwrite << ints.at(name);
-				else if (bools.contains(name))
-					cwrite << (bools.at(name) ? "True" : "False");
-				cwrite << "\n";
+			cwrite << current_config();
+		}
+	}
+
+	static constexpr auto get_xdg_state_dir() -> std::optional<fs::path> {
+		std::optional<fs::path> xdg_state_home;
+
+		{
+			const auto* xdg_state_home_ptr = std::getenv("XDG_STATE_HOME");
+			if (xdg_state_home_ptr != nullptr) {
+				xdg_state_home = std::make_optional(fs::path(xdg_state_home_ptr));
+			} else {
+				const auto* home_ptr = std::getenv("HOME");
+				if (home_ptr != nullptr) {
+					xdg_state_home = std::make_optional(fs::path(home_ptr) / ".local" / "state");
+				}
 			}
 		}
+
+		if (xdg_state_home.has_value()) {
+			std::error_code err;
+			fs::create_directories(xdg_state_home.value(), err);
+			if (err) {
+				return std::nullopt;
+			}
+			return xdg_state_home;
+		}
+		return std::nullopt;
+	}
+
+	auto get_log_file() -> std::optional<fs::path> {
+		return get_xdg_state_dir().transform([](auto&& state_home) -> auto { return state_home / "btop.log"; });
+	}
+
+	auto current_config() -> std::string {
+		auto buffer = std::string {};
+		fmt::format_to(std::back_inserter(buffer), "#? Config file for btop v.{}\n", Global::Version);
+
+		for (const auto& [name, description] : descriptions) {
+			// Write a description comment if available.
+			fmt::format_to(std::back_inserter(buffer), "\n");
+			if (!description.empty()) {
+				fmt::format_to(std::back_inserter(buffer), "{}\n", description);
+			}
+
+			fmt::format_to(std::back_inserter(buffer), "{} = ", name);
+			// Lookup default value by name and write it out.
+			if (strings.contains(name)) {
+				fmt::format_to(std::back_inserter(buffer), R"("{}")", strings[name]);
+			} else if (ints.contains(name)) {
+				fmt::format_to(std::back_inserter(buffer), std::locale::classic(), "{:L}", ints[name]);
+			} else if (bools.contains(name)) {
+				fmt::format_to(std::back_inserter(buffer), "{}", bools[name] ? "true" : "false");
+			}
+			fmt::format_to(std::back_inserter(buffer), "\n");
+		}
+		return buffer;
 	}
 }

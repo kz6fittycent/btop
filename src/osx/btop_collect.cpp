@@ -16,6 +16,7 @@ indent = tab
 tab-size = 4
 */
 
+#ifdef __APPLE__
 #include <Availability.h>
 #include <CoreFoundation/CoreFoundation.h>
 #include <IOKit/IOKitLib.h>
@@ -47,27 +48,118 @@ tab-size = 4
 #include <stdexcept>
 #include <utility>
 
-#include <cmath>
-#include <fstream>
-#include <numeric>
-#include <ranges>
-#include <regex>
-#include <string>
-
-#include "../btop_config.hpp"
-#include "../btop_shared.hpp"
-#include "../btop_tools.hpp"
-
 #if __MAC_OS_X_VERSION_MIN_REQUIRED > 101504
 #include "sensors.hpp"
 #endif
 #include "smc.hpp"
+#endif
+
+#include <cmath>
+#include <fstream>
+#include <future>
+#include <mutex>
+#include <numeric>
+#include <ranges>
+#include <regex>
+#include <string>
+#include <unordered_set>
+
+#include <fmt/format.h>
+
+#include "../btop_config.hpp"
+#include "../btop_log.hpp"
+#include "../btop_shared.hpp"
+#include "../btop_tools.hpp"
+
+#if defined(GPU_SUPPORT) && defined(__APPLE__) && defined(__arm64__)
+#include <dlfcn.h>
+#include <mach/mach_time.h>
+
+//? IOReport C function declarations for Apple Silicon GPU metrics
+extern "C" {
+	typedef struct IOReportSubscription* IOReportSubscriptionRef;
+
+	CFDictionaryRef IOReportCopyChannelsInGroup(CFStringRef group, CFStringRef subgroup,
+		uint64_t a, uint64_t b, uint64_t c);
+	void IOReportMergeChannels(CFDictionaryRef a, CFDictionaryRef b, CFTypeRef cfnull);
+	IOReportSubscriptionRef IOReportCreateSubscription(void* a, CFMutableDictionaryRef b,
+		CFMutableDictionaryRef* c, uint64_t d, CFTypeRef cfnull);
+	CFDictionaryRef IOReportCreateSamples(IOReportSubscriptionRef sub,
+		CFMutableDictionaryRef chan, CFTypeRef cfnull);
+	CFDictionaryRef IOReportCreateSamplesDelta(CFDictionaryRef a, CFDictionaryRef b, CFTypeRef cfnull);
+	CFStringRef IOReportChannelGetGroup(CFDictionaryRef item);
+	CFStringRef IOReportChannelGetSubGroup(CFDictionaryRef item);
+	CFStringRef IOReportChannelGetChannelName(CFDictionaryRef item);
+	int64_t IOReportSimpleGetIntegerValue(CFDictionaryRef item, int32_t idx);
+	CFStringRef IOReportChannelGetUnitLabel(CFDictionaryRef item);
+	int32_t IOReportStateGetCount(CFDictionaryRef item);
+	CFStringRef IOReportStateGetNameForIndex(CFDictionaryRef item, int32_t idx);
+	int64_t IOReportStateGetResidency(CFDictionaryRef item, int32_t idx);
+
+	//? IOHIDEvent declarations for GPU temperature
+	typedef struct __IOHIDEvent* IOHIDEventRef;
+	typedef struct __IOHIDServiceClient* IOHIDServiceClientRef;
+	typedef struct __IOHIDEventSystemClient* IOHIDEventSystemClientRef;
+	#ifdef __LP64__
+	typedef double IOHIDFloat;
+	#else
+	typedef float IOHIDFloat;
+	#endif
+	IOHIDEventSystemClientRef IOHIDEventSystemClientCreate(CFAllocatorRef allocator);
+	int IOHIDEventSystemClientSetMatching(IOHIDEventSystemClientRef client, CFDictionaryRef match);
+	CFArrayRef IOHIDEventSystemClientCopyServices(IOHIDEventSystemClientRef client);
+	IOHIDEventRef IOHIDServiceClientCopyEvent(IOHIDServiceClientRef sc, int64_t type, int32_t a, int64_t b);
+	CFStringRef IOHIDServiceClientCopyProperty(IOHIDServiceClientRef service, CFStringRef property);
+	IOHIDFloat IOHIDEventGetFloatValue(IOHIDEventRef event, int32_t field);
+}
+#endif // GPU_SUPPORT
+
+#if __MAC_OS_X_VERSION_MIN_REQUIRED < 120000
+#define kIOMainPortDefault kIOMasterPortDefault
+#endif
 
 using std::clamp, std::string_literals::operator""s, std::cmp_equal, std::cmp_less, std::cmp_greater;
 using std::ifstream, std::numeric_limits, std::streamsize, std::round, std::max, std::min;
 namespace fs = std::filesystem;
 namespace rng = std::ranges;
 using namespace Tools;
+
+//? RAII wrapper for CoreFoundation types — releases via CFRelease() on destruction
+template <typename T>
+struct CFRef {
+	T ref;
+	CFRef() : ref(nullptr) {}
+	CFRef(T ref) : ref(ref) {}
+	~CFRef() { if (ref) CFRelease((CFTypeRef)ref); }
+	CFRef(const CFRef&) = delete;
+	CFRef& operator=(const CFRef&) = delete;
+	CFRef(CFRef&& other) noexcept : ref(other.ref) { other.ref = nullptr; }
+	CFRef& operator=(CFRef&& other) noexcept {
+		if (this != &other) { reset(); ref = other.ref; other.ref = nullptr; }
+		return *this;
+	}
+	operator T() const { return ref; }
+	T get() const { return ref; }
+	T* ptr() { return &ref; }
+	void reset(T new_ref = nullptr) {
+		if (ref) CFRelease((CFTypeRef)ref);
+		ref = new_ref;
+	}
+	T release() { T r = ref; ref = nullptr; return r; }
+};
+
+//? RAII wrapper for IOKit object types — releases via IOObjectRelease() on destruction
+struct IORef {
+	io_object_t ref;
+	IORef() : ref(0) {}
+	IORef(io_object_t ref) : ref(ref) {}
+	~IORef() { if (ref) IOObjectRelease(ref); }
+	IORef(const IORef&) = delete;
+	IORef& operator=(const IORef&) = delete;
+	operator io_object_t() const { return ref; }
+	io_object_t get() const { return ref; }
+	io_object_t* ptr() { return &ref; }
+};
 
 //? --------------------------------------------------- FUNCTIONS -----------------------------------------------------
 
@@ -77,7 +169,7 @@ namespace Cpu {
 	vector<string> available_fields = {"Auto", "total"};
 	vector<string> available_sensors = {"Auto"};
 	cpu_info current_cpu;
-	bool got_sensors = false, cpu_temp_only = false;
+	bool got_sensors = false, cpu_temp_only = false, supports_watts = false;
 	int core_offset = 0;
 
 	//* Populate found_sensors map
@@ -105,6 +197,448 @@ namespace Cpu {
 namespace Mem {
 	double old_uptime;
 }
+
+#if defined(GPU_SUPPORT)
+namespace Gpu {
+	vector<gpu_info> gpus;
+
+	//? Stub shutdown for backends not available on macOS
+	namespace Nvml { bool shutdown() { return false; } }
+	namespace Rsmi { bool shutdown() { return false; } }
+	namespace Asysfs { bool shutdown() { return false; } }
+
+	//? Apple Silicon GPU data collection via IOReport
+	namespace AppleSilicon {
+		bool initialized = false;
+		unsigned int device_count = 0;
+
+		//? Forward declaration
+		template <bool is_init>
+		bool collect(gpu_info* gpus_slice);
+
+		//? IOReport subscription state
+		IOReportSubscriptionRef ior_sub = nullptr;
+		CFMutableDictionaryRef ior_chan = nullptr;
+		CFDictionaryRef prev_sample = nullptr;
+		uint64_t prev_sample_time = 0;
+
+		//? GPU frequency table from DVFS
+		vector<uint32_t> gpu_freqs;
+
+		static string cfstring_to_string(CFStringRef cfstr) {
+			if (not cfstr) return "";
+			char buf[256];
+			if (CFStringGetCString(cfstr, buf, sizeof(buf), kCFStringEncodingUTF8))
+				return string(buf);
+			return "";
+		}
+
+		static string get_chip_name() {
+			char buf[256];
+			size_t size = sizeof(buf);
+			if (sysctlbyname("machdep.cpu.brand_string", buf, &size, nullptr, 0) == 0)
+				return string(buf);
+			return "Apple Silicon GPU";
+		}
+
+		static uint64_t get_mach_time_ms() {
+			static mach_timebase_info_data_t timebase = {0, 0};
+			if (timebase.denom == 0) mach_timebase_info(&timebase);
+			return (mach_absolute_time() * timebase.numer / timebase.denom) / 1000000;
+		}
+
+		//? Read GPU DVFS frequency table from IORegistry pmgr node
+		static void get_gpu_freqs_from_pmgr() {
+			io_iterator_t iter_raw;
+			//? matchDict ownership is consumed by IOServiceGetMatchingServices
+			CFMutableDictionaryRef matchDict = IOServiceMatching("AppleARMIODevice");
+			if (IOServiceGetMatchingServices(kIOMainPortDefault, matchDict, &iter_raw) != kIOReturnSuccess)
+				return;
+			IORef iter(iter_raw);
+
+			io_object_t entry_raw;
+			while ((entry_raw = IOIteratorNext(iter)) != 0) {
+				IORef entry(entry_raw);
+				char name[128];
+				if (IORegistryEntryGetName(entry, name) == kIOReturnSuccess and string(name) == "pmgr") {
+					CFMutableDictionaryRef props_raw = nullptr;
+					if (IORegistryEntryCreateCFProperties(entry, &props_raw, kCFAllocatorDefault, 0) == kIOReturnSuccess and props_raw) {
+						CFRef<CFMutableDictionaryRef> props(props_raw);
+						CFDataRef dvfs_data = (CFDataRef)CFDictionaryGetValue(props, CFSTR("voltage-states9"));
+						if (dvfs_data) {
+							auto len = CFDataGetLength(dvfs_data);
+							auto ptr = CFDataGetBytePtr(dvfs_data);
+							//? Pairs of (freq, voltage), 4 bytes each
+							for (CFIndex i = 0; i + 7 < len; i += 8) {
+								uint32_t freq = 0;
+								memcpy(&freq, ptr + i, 4);
+								if (freq > 0) gpu_freqs.push_back(freq / (1000 * 1000)); // Hz -> MHz
+							}
+						}
+					}
+				}
+			}
+		}
+
+		bool init() {
+			if (initialized) return false;
+
+			//? Get GPU frequency table
+			get_gpu_freqs_from_pmgr();
+
+			//? Set up IOReport channels for GPU Stats and Energy Model
+			CFRef<CFStringRef> gpu_stats_group(CFStringCreateWithCString(kCFAllocatorDefault, "GPU Stats", kCFStringEncodingUTF8));
+			CFRef<CFStringRef> gpu_perf_subgroup(CFStringCreateWithCString(kCFAllocatorDefault, "GPU Performance States", kCFStringEncodingUTF8));
+			CFRef<CFStringRef> energy_group(CFStringCreateWithCString(kCFAllocatorDefault, "Energy Model", kCFStringEncodingUTF8));
+
+			CFRef<CFDictionaryRef> gpu_chan(IOReportCopyChannelsInGroup(gpu_stats_group, gpu_perf_subgroup, 0, 0, 0));
+			CFRef<CFDictionaryRef> energy_chan(IOReportCopyChannelsInGroup(energy_group, nullptr, 0, 0, 0));
+
+			if (not gpu_chan.get() and not energy_chan.get()) {
+				Logger::info("Apple Silicon GPU: No IOReport channels found, GPU monitoring unavailable");
+				return false;
+			}
+
+			//? Merge channels into a single subscription
+			if (gpu_chan.get() and energy_chan.get()) {
+				IOReportMergeChannels(gpu_chan, energy_chan, nullptr);
+			}
+			CFDictionaryRef base_chan = gpu_chan.get() ? gpu_chan.get() : energy_chan.get();
+
+			auto size = CFDictionaryGetCount(base_chan);
+			ior_chan = CFDictionaryCreateMutableCopy(kCFAllocatorDefault, size, base_chan);
+
+			//? Create IOReport subscription
+			CFMutableDictionaryRef sub_dict = nullptr;
+			ior_sub = IOReportCreateSubscription(nullptr, ior_chan, &sub_dict, 0, nullptr);
+			if (not ior_sub) {
+				Logger::warning("Apple Silicon GPU: Failed to create IOReport subscription");
+				CFRelease(ior_chan);
+				ior_chan = nullptr;
+				return false;
+			}
+
+			device_count = 1; //? Apple Silicon has one integrated GPU
+			gpus.resize(gpus.size() + device_count);
+			gpu_names.resize(gpu_names.size() + device_count);
+
+			initialized = true;
+
+			//? Take initial sample for delta computation
+			prev_sample = IOReportCreateSamples(ior_sub, ior_chan, nullptr);
+			prev_sample_time = get_mach_time_ms();
+
+			//? Run init collect to populate names and supported functions
+			collect<1>(gpus.data());
+
+			return true;
+		}
+
+		bool shutdown() {
+			if (not initialized) return false;
+			if (prev_sample) { CFRelease(prev_sample); prev_sample = nullptr; }
+			if (ior_chan) { CFRelease(ior_chan); ior_chan = nullptr; }
+			if (ior_sub) { CFRelease((CFTypeRef)ior_sub); ior_sub = nullptr; }
+			initialized = false;
+			return true;
+		}
+
+		//? Read GPU temperature via IOHIDEventSystem thermal sensors
+		static long long get_gpu_temp_iohid() {
+			#if __MAC_OS_X_VERSION_MIN_REQUIRED > 101504
+			constexpr int kHIDPage_AppleVendor = 0xff00;
+			constexpr int kHIDUsage_TemperatureSensor = 5;
+			constexpr int64_t kIOHIDEventTypeTemperature = 15;
+
+			CFStringRef keys[2] = { CFSTR("PrimaryUsagePage"), CFSTR("PrimaryUsage") };
+			int page = kHIDPage_AppleVendor, usage = kHIDUsage_TemperatureSensor;
+			CFRef<CFNumberRef> num0(CFNumberCreate(nullptr, kCFNumberSInt32Type, &page));
+			CFRef<CFNumberRef> num1(CFNumberCreate(nullptr, kCFNumberSInt32Type, &usage));
+			const void* values[] = { num0.get(), num1.get() };
+			CFRef<CFDictionaryRef> match(CFDictionaryCreate(nullptr,
+				(const void**)keys, values, 2,
+				&kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks));
+
+			CFRef<IOHIDEventSystemClientRef> system(IOHIDEventSystemClientCreate(kCFAllocatorDefault));
+			if (not system.get()) return -1;
+			IOHIDEventSystemClientSetMatching(system, match);
+			CFRef<CFArrayRef> services(IOHIDEventSystemClientCopyServices(system));
+
+			if (not services.get()) return -1;
+
+			double gpu_temp_sum = 0;
+			int gpu_temp_count = 0;
+			long count = CFArrayGetCount(services);
+			for (long i = 0; i < count; i++) {
+				auto sc = (IOHIDServiceClientRef)CFArrayGetValueAtIndex(services, i);
+				if (not sc) continue;
+				CFRef<CFStringRef> name(IOHIDServiceClientCopyProperty(sc, CFSTR("Product")));
+				if (not name.get()) continue;
+				char buf[200];
+				CFStringGetCString(name, buf, 200, kCFStringEncodingASCII);
+				string n(buf);
+				//? Legacy Apple Silicon uses "GPU MTR Temp Sensor*" names.
+				//? On newer Apple Silicon we can see PMU TP*g sensors for GPU temperatures.
+				bool is_gpu_sensor = n.find("GPU") != string::npos;
+				if (not is_gpu_sensor and n.rfind("PMU TP", 0) == 0 and not n.empty() and n.back() == 'g') {
+					is_gpu_sensor = true;
+				}
+				if (is_gpu_sensor) {
+					CFRef<IOHIDEventRef> event(IOHIDServiceClientCopyEvent(sc, kIOHIDEventTypeTemperature, 0, 0));
+					if (event.get()) {
+						double temp = IOHIDEventGetFloatValue(event, kIOHIDEventTypeTemperature << 16);
+						if (temp > 0 and temp < 150) {
+							gpu_temp_sum += temp;
+							gpu_temp_count++;
+						}
+					}
+				}
+			}
+
+			if (gpu_temp_count > 0)
+				return static_cast<long long>(round(gpu_temp_sum / gpu_temp_count));
+			#endif
+			return -1;
+		}
+
+		template <bool is_init>
+		bool collect(gpu_info* gpus_slice) {
+			if (not initialized) return false;
+
+			if constexpr (is_init) {
+				//? Device name
+				string chip = get_chip_name();
+				gpu_names[0] = chip + " GPU";
+
+				//? Power max (typical Apple Silicon GPU TDP ~15-20W)
+				gpus_slice[0].pwr_max_usage = 20000; // 20W in mW
+				gpu_pwr_total_max += gpus_slice[0].pwr_max_usage;
+
+				//? Temperature max
+				gpus_slice[0].temp_max = 110;
+
+				//? Memory total (unified memory architecture — GPU shares system RAM)
+				int64_t memsize = 0;
+				size_t size = sizeof(memsize);
+				if (sysctlbyname("hw.memsize", &memsize, &size, nullptr, 0) == 0)
+					gpus_slice[0].mem_total = memsize;
+
+				//? Supported functions
+				gpus_slice[0].supported_functions = {
+					.gpu_utilization = true,
+					.mem_utilization = true,
+					.gpu_clock = not gpu_freqs.empty(),
+					.mem_clock = false,
+					.pwr_usage = true,
+					.pwr_state = false,
+					.temp_info = true,
+					.mem_total = true,
+					.mem_used = true,
+					.pcie_txrx = false,
+					.encoder_utilization = false,
+					.decoder_utilization = false
+				};
+			}
+
+			//? Take new IOReport sample and compute delta
+			CFDictionaryRef cur_sample = IOReportCreateSamples(ior_sub, ior_chan, nullptr);
+			if (not cur_sample) return false;
+
+			uint64_t cur_time = get_mach_time_ms();
+			uint64_t dt = cur_time - prev_sample_time;
+			if (dt == 0) dt = 1;
+
+			CFRef<CFDictionaryRef> delta;
+			if (prev_sample) {
+				delta.reset(IOReportCreateSamplesDelta(prev_sample, cur_sample, nullptr));
+				CFRelease(prev_sample);
+			}
+			prev_sample = cur_sample;
+			prev_sample_time = cur_time;
+
+			if (not delta.get()) return false;
+
+			//? Parse delta samples
+			CFArrayRef channels = (CFArrayRef)CFDictionaryGetValue(delta, CFSTR("IOReportChannels"));
+			if (not channels) return false;
+
+			long long gpu_utilization = 0;
+			bool got_gpu_util = false;
+			double gpu_power_watts = 0;
+			bool got_gpu_power = false;
+
+			long chan_count = CFArrayGetCount(channels);
+			for (long i = 0; i < chan_count; i++) {
+				CFDictionaryRef item = (CFDictionaryRef)CFArrayGetValueAtIndex(channels, i);
+				if (not item) continue;
+
+				string group = cfstring_to_string(IOReportChannelGetGroup(item));
+				string subgroup = cfstring_to_string(IOReportChannelGetSubGroup(item));
+				string channel = cfstring_to_string(IOReportChannelGetChannelName(item));
+
+				//? GPU utilization from residency states
+				if (group == "GPU Stats" and subgroup == "GPU Performance States" and channel == "GPUPH") {
+					int32_t state_count = IOReportStateGetCount(item);
+					if (state_count <= 0) continue;
+
+					int64_t total_residency = 0;
+					int64_t active_residency = 0;
+					double weighted_freq = 0;
+
+					//? Find offset past IDLE/OFF/DOWN states
+					int offset = 0;
+					for (int32_t s = 0; s < state_count; s++) {
+						string name = cfstring_to_string(IOReportStateGetNameForIndex(item, s));
+						if (name == "IDLE" or name == "OFF" or name == "DOWN")
+							offset = s + 1;
+						total_residency += IOReportStateGetResidency(item, s);
+					}
+
+					int freq_count = static_cast<int>(gpu_freqs.size());
+					for (int32_t s = offset; s < state_count; s++) {
+						int64_t res = IOReportStateGetResidency(item, s);
+						active_residency += res;
+						int freq_idx = s - offset;
+						if (freq_idx < freq_count and active_residency > 0)
+							weighted_freq += static_cast<double>(res) * gpu_freqs[freq_idx];
+					}
+
+					if (total_residency > 0) {
+						double usage_ratio = static_cast<double>(active_residency) / static_cast<double>(total_residency);
+						gpu_utilization = clamp(static_cast<long long>(round(usage_ratio * 100.0)), 0ll, 100ll);
+						got_gpu_util = true;
+
+						//? Calculate average frequency
+						if (active_residency > 0 and not gpu_freqs.empty()) {
+							double avg_freq = weighted_freq / static_cast<double>(active_residency);
+							gpus_slice[0].gpu_clock_speed = static_cast<unsigned int>(round(avg_freq));
+						}
+					}
+				}
+
+				//? GPU power from Energy Model
+				if (group == "Energy Model" and channel == "GPU Energy") {
+					string unit = cfstring_to_string(IOReportChannelGetUnitLabel(item));
+					int64_t val = IOReportSimpleGetIntegerValue(item, 0);
+					double energy = static_cast<double>(val);
+					double divisor = static_cast<double>(dt) / 1000.0; // dt is in ms
+
+					if (unit.find("nJ") != string::npos) energy /= 1e9;
+					else if (unit.find("uJ") != string::npos or unit.find("\xc2\xb5J") != string::npos) energy /= 1e6;
+					else if (unit.find("mJ") != string::npos) energy /= 1e3;
+					//? energy is now in Joules
+
+					if (divisor > 0) {
+						gpu_power_watts = energy / divisor;
+						got_gpu_power = true;
+					}
+				}
+			}
+
+			//? Store GPU utilization
+			if (got_gpu_util) {
+				gpus_slice[0].gpu_percent.at("gpu-totals").push_back(gpu_utilization);
+				gpus_slice[0].mem_utilization_percent.push_back(gpu_utilization);
+			}
+
+			//? Store power usage (convert W to mW)
+			if (got_gpu_power) {
+				gpus_slice[0].pwr_usage = static_cast<long long>(round(gpu_power_watts * 1000.0));
+				if (gpus_slice[0].pwr_usage > gpus_slice[0].pwr_max_usage)
+					gpus_slice[0].pwr_max_usage = gpus_slice[0].pwr_usage;
+				gpus_slice[0].gpu_percent.at("gpu-pwr-totals").push_back(
+					clamp(static_cast<long long>(round(static_cast<double>(gpus_slice[0].pwr_usage) * 100.0 / static_cast<double>(gpus_slice[0].pwr_max_usage))), 0ll, 100ll));
+			}
+
+			//? GPU temperature
+			if (gpus_slice[0].supported_functions.temp_info and Config::getB("check_temp")) {
+				long long temp = get_gpu_temp_iohid();
+				if (temp > 0)
+					gpus_slice[0].temp.push_back(temp);
+			}
+
+			//? Memory usage (unified memory — report system memory usage)
+			if (gpus_slice[0].supported_functions.mem_total) {
+				vm_size_t page_size;
+				mach_port_t mach_port = mach_host_self();
+				vm_statistics64_data_t vm_stats;
+				mach_msg_type_number_t count = sizeof(vm_stats) / sizeof(natural_t);
+				host_page_size(mach_port, &page_size);
+
+				if (host_statistics64(mach_port, HOST_VM_INFO64, (host_info64_t)&vm_stats, &count) == KERN_SUCCESS) {
+					long long used = (static_cast<int64_t>(vm_stats.active_count)
+						+ static_cast<int64_t>(vm_stats.inactive_count)
+						+ static_cast<int64_t>(vm_stats.wire_count)
+						+ static_cast<int64_t>(vm_stats.speculative_count)
+						+ static_cast<int64_t>(vm_stats.compressor_page_count)
+						- static_cast<int64_t>(vm_stats.purgeable_count)
+						- static_cast<int64_t>(vm_stats.external_page_count)) * static_cast<int64_t>(page_size);
+					if (used < 0) used = 0;
+					gpus_slice[0].mem_used = used;
+					if (gpus_slice[0].mem_total > 0) {
+						auto used_pct = static_cast<long long>(round(static_cast<double>(used) * 100.0 / static_cast<double>(gpus_slice[0].mem_total)));
+						gpus_slice[0].gpu_percent.at("gpu-vram-totals").push_back(clamp(used_pct, 0ll, 100ll));
+					}
+				}
+			}
+
+			return true;
+		}
+
+		//? Explicit template instantiations
+		template bool collect<true>(gpu_info*);
+		template bool collect<false>(gpu_info*);
+	} // namespace AppleSilicon
+
+	//? Collect data from Apple Silicon GPU
+	auto collect(bool no_update) -> vector<gpu_info>& {
+		if (Runner::stopping or (no_update and not gpus.empty())) return gpus;
+
+		AppleSilicon::collect<0>(gpus.data());
+
+		//* Calculate averages
+		long long avg = 0;
+		long long mem_usage_total = 0;
+		long long mem_total = 0;
+		long long pwr_total = 0;
+		for (auto& gpu : gpus) {
+			if (gpu.supported_functions.gpu_utilization and not gpu.gpu_percent.at("gpu-totals").empty())
+				avg += gpu.gpu_percent.at("gpu-totals").back();
+			if (gpu.supported_functions.mem_used)
+				mem_usage_total += gpu.mem_used;
+			if (gpu.supported_functions.mem_total)
+				mem_total += gpu.mem_total;
+			if (gpu.supported_functions.pwr_usage)
+				pwr_total += gpu.pwr_usage;
+
+			//* Trim vectors if there are more values than needed for graphs
+			if (width != 0) {
+				while (cmp_greater(gpu.gpu_percent.at("gpu-totals").size(), width * 2)) gpu.gpu_percent.at("gpu-totals").pop_front();
+				while (cmp_greater(gpu.mem_utilization_percent.size(), width)) gpu.mem_utilization_percent.pop_front();
+				while (cmp_greater(gpu.gpu_percent.at("gpu-pwr-totals").size(), width)) gpu.gpu_percent.at("gpu-pwr-totals").pop_front();
+				while (cmp_greater(gpu.temp.size(), 18)) gpu.temp.pop_front();
+				while (cmp_greater(gpu.gpu_percent.at("gpu-vram-totals").size(), width/2)) gpu.gpu_percent.at("gpu-vram-totals").pop_front();
+			}
+		}
+
+		if (not gpus.empty()) {
+			shared_gpu_percent.at("gpu-average").push_back(avg / static_cast<long long>(gpus.size()));
+			if (mem_total != 0)
+				shared_gpu_percent.at("gpu-vram-total").push_back(mem_usage_total * 100 / mem_total);
+			if (gpu_pwr_total_max != 0)
+				shared_gpu_percent.at("gpu-pwr-total").push_back(pwr_total * 100 / gpu_pwr_total_max);
+		}
+
+		if (width != 0) {
+			while (cmp_greater(shared_gpu_percent.at("gpu-average").size(), width * 2)) shared_gpu_percent.at("gpu-average").pop_front();
+			while (cmp_greater(shared_gpu_percent.at("gpu-vram-total").size(), width)) shared_gpu_percent.at("gpu-vram-total").pop_front();
+			while (cmp_greater(shared_gpu_percent.at("gpu-pwr-total").size(), width)) shared_gpu_percent.at("gpu-pwr-total").pop_front();
+		}
+
+		return gpus;
+	}
+} // namespace Gpu
+#endif // GPU_SUPPORT
 
 	class MachProcessorInfo {
 	public:
@@ -179,6 +713,31 @@ namespace Shared {
 		Cpu::got_sensors = Cpu::get_sensors();
 		Cpu::core_mapping = Cpu::get_core_mapping();
 
+		//? Init for namespace Gpu
+	#ifdef GPU_SUPPORT
+		auto shown_gpus = Config::getS("shown_gpus");
+		if (shown_gpus.contains("apple")) {
+			Gpu::AppleSilicon::init();
+		}
+
+		if (not Gpu::gpu_names.empty()) {
+			for (auto const& [key, _] : Gpu::gpus[0].gpu_percent)
+				Cpu::available_fields.push_back(key);
+			for (auto const& [key, _] : Gpu::shared_gpu_percent)
+				Cpu::available_fields.push_back(key);
+
+			using namespace Gpu;
+			count = gpus.size();
+			gpu_b_height_offsets.resize(gpus.size());
+			for (size_t i = 0; i < gpu_b_height_offsets.size(); ++i)
+				gpu_b_height_offsets[i] = gpus[i].supported_functions.gpu_utilization
+					+ gpus[i].supported_functions.pwr_usage
+					+ (gpus[i].supported_functions.encoder_utilization or gpus[i].supported_functions.decoder_utilization)
+					+ (gpus[i].supported_functions.mem_total or gpus[i].supported_functions.mem_used)
+						* (1 + 2*(gpus[i].supported_functions.mem_total and gpus[i].supported_functions.mem_used) + 2*gpus[i].supported_functions.mem_utilization);
+		}
+	#endif
+
 		//? Init for namespace Mem
 		Mem::old_uptime = system_uptime();
 		Mem::collect();
@@ -212,61 +771,28 @@ namespace Cpu {
 			Logger::error("Failed to get CPU name");
 			return name;
 		}
-		name = string(buffer);
-
-		auto name_vec = ssplit(name);
-
-		if ((s_contains(name, "Xeon"s) or v_contains(name_vec, "Duo"s)) and v_contains(name_vec, "CPU"s)) {
-			auto cpu_pos = v_index(name_vec, "CPU"s);
-			if (cpu_pos < name_vec.size() - 1 and not name_vec.at(cpu_pos + 1).ends_with(')'))
-				name = name_vec.at(cpu_pos + 1);
-			else
-				name.clear();
-		} else if (v_contains(name_vec, "Ryzen"s)) {
-			auto ryz_pos = v_index(name_vec, "Ryzen"s);
-			name = "Ryzen" + (ryz_pos < name_vec.size() - 1 ? ' ' + name_vec.at(ryz_pos + 1) : "") + (ryz_pos < name_vec.size() - 2 ? ' ' + name_vec.at(ryz_pos + 2) : "");
-		} else if (s_contains(name, "Intel"s) and v_contains(name_vec, "CPU"s)) {
-			auto cpu_pos = v_index(name_vec, "CPU"s);
-			if (cpu_pos < name_vec.size() - 1 and not name_vec.at(cpu_pos + 1).ends_with(')') and name_vec.at(cpu_pos + 1) != "@")
-				name = name_vec.at(cpu_pos + 1);
-			else
-				name.clear();
-		} else
-			name.clear();
-
-		if (name.empty() and not name_vec.empty()) {
-			for (const auto &n : name_vec) {
-				if (n == "@") break;
-				name += n + ' ';
-			}
-			name.pop_back();
-				for (const auto& replace : {"Processor", "CPU", "(R)", "(TM)", "Intel", "AMD", "Apple", "Core"}) {
-					name = s_replace(name, replace, "");
-					name = s_replace(name, "  ", " ");
-				}
-				name = trim(name);
-		}
-
-		return name;
+		return trim_name(string(buffer));
 	}
 
 	bool get_sensors() {
-		Logger::debug("get_sensors(): show_coretemp=" + std::to_string(Config::getB("show_coretemp")) + " check_temp=" + std::to_string(Config::getB("check_temp")));
+		Logger::debug("get_sensors(): show_coretemp={} check_temp={}", Config::getB("show_coretemp"), Config::getB("check_temp"));
 		got_sensors = false;
 		if (Config::getB("show_coretemp") and Config::getB("check_temp")) {
 #if __MAC_OS_X_VERSION_MIN_REQUIRED > 101504
 			ThermalSensors sensors;
-			if (sensors.getSensors() > 0) {
+			std::vector<long long> core_temps;
+			if (sensors.getSensors(core_temps) > 0) {
 				Logger::debug("M1 sensors found");
 				got_sensors = true;
-				cpu_temp_only = true;
+				cpu_temp_only = core_temps.empty();
 				macM1 = true;
 			} else {
 #endif
 				// try SMC (intel)
 				Logger::debug("checking intel");
-				SMCConnection smcCon;
 				try {
+					SMCConnection smcCon;
+					Logger::debug("SMC connection established");
 					long long t = smcCon.getTemp(-1);  // check if we have package T
 					if (t > -1) {
 						Logger::debug("intel sensors found");
@@ -284,7 +810,8 @@ namespace Cpu {
 						got_sensors = false;
 					}
 				} catch (std::runtime_error &e) {
-					// ignore, we don't have temp
+					Logger::debug("SMC not available: {}", e.what());
+					// ignore, we don't have temp (common in VMs)
 					got_sensors = false;
 				}
 #if __MAC_OS_X_VERSION_MIN_REQUIRED > 101504
@@ -294,24 +821,64 @@ namespace Cpu {
 		return got_sensors;
 	}
 
-	void update_sensors() {
-		current_cpu.temp_max = 95;  // we have no idea how to get the critical temp
+	struct SensorResult {
+		long long package_temp{};
+		std::vector<long long> core_temps;
+		bool valid{false};
+	};
+
+	static SensorResult collect_sensors() {
+		SensorResult result;
 		try {
 			if (macM1) {
 #if __MAC_OS_X_VERSION_MIN_REQUIRED > 101504
 				ThermalSensors sensors;
-				current_cpu.temp.at(0).push_back(sensors.getSensors());
-				if (current_cpu.temp.at(0).size() > 20)
-					current_cpu.temp.at(0).pop_front();
+				result.package_temp = sensors.getSensors(result.core_temps);
+				result.valid = true;
 #endif
 			} else {
 				SMCConnection smcCon;
 				int threadsPerCore = Shared::coreCount / Shared::physicalCoreCount;
-				long long packageT = smcCon.getTemp(-1); // -1 returns package T
-				current_cpu.temp.at(0).push_back(packageT);
-
+				result.package_temp = smcCon.getTemp(-1);
 				for (int core = 0; core < Shared::coreCount; core++) {
-					long long temp = smcCon.getTemp((core / threadsPerCore) + core_offset); // same temp for all threads of same physical core
+					result.core_temps.push_back(smcCon.getTemp((core / threadsPerCore) + core_offset));
+				}
+				result.valid = true;
+			}
+		} catch (std::runtime_error &e) {
+			Logger::error("failed getting CPU temp: {}", e.what());
+		}
+		return result;
+	}
+
+	void update_sensors() {
+		static std::future<SensorResult> sensor_future;
+		static SensorResult last_result{};
+
+		current_cpu.temp_max = 95;  // we have no idea how to get the critical temp
+
+		if (sensor_future.valid() and
+		    sensor_future.wait_for(std::chrono::seconds(0)) != std::future_status::timeout) {
+			last_result = sensor_future.get();
+			if (not last_result.valid) {
+				got_sensors = false;
+			}
+		}
+
+		if (last_result.valid) {
+			current_cpu.temp.at(0).push_back(last_result.package_temp);
+			if (current_cpu.temp.at(0).size() > 20)
+				current_cpu.temp.at(0).pop_front();
+
+			if (macM1) {
+				cpu_temp_only = last_result.core_temps.empty();
+			}
+
+			bool show_coretemp = macM1 ? Config::getB("show_coretemp") : true;
+			if (show_coretemp and not last_result.core_temps.empty()) {
+				for (int core = 0; core < Shared::coreCount; core++) {
+					size_t sensor_index = static_cast<size_t>(core) * last_result.core_temps.size() / Shared::coreCount;
+					long long temp = last_result.core_temps.at(sensor_index);
 					if (cmp_less(core + 1, current_cpu.temp.size())) {
 						current_cpu.temp.at(core + 1).push_back(temp);
 						if (current_cpu.temp.at(core + 1).size() > 20)
@@ -319,10 +886,9 @@ namespace Cpu {
 					}
 				}
 			}
-		} catch (std::runtime_error &e) {
-			got_sensors = false;
-			Logger::error("failed getting CPU temp");
 		}
+
+		sensor_future = std::async(std::launch::async, collect_sensors);
 	}
 
 	string get_cpuHz() {
@@ -505,8 +1071,8 @@ namespace Cpu {
 				if (cpu.core_percent.at(i).size() > 40) cpu.core_percent.at(i).pop_front();
 
 			} catch (const std::exception &e) {
-				Logger::error("Cpu::collect() : " + (string)e.what());
-				throw std::runtime_error("collect() : " + (string)e.what());
+				Logger::error("Cpu::collect() : {}", e.what());
+				throw std::runtime_error(fmt::format("collect() : {}", e.what()));
 			}
 		}
 
@@ -556,6 +1122,8 @@ namespace Mem {
 	fs::file_time_type fstab_time;
 	int disk_ios = 0;
 	vector<string> last_found;
+	static std::mutex iokit_mutex;  // Protect concurrent IOKit calls
+	static std::mutex interface_mutex;  // Protect concurrent interface access during USB device changes
 
 	mem_info current_mem{};
 
@@ -601,16 +1169,14 @@ namespace Mem {
 	};
 
 	void collect_disk(std::unordered_map<string, disk_info> &disks, std::unordered_map<string, string> &mapping) {
+		// Lock mutex to prevent concurrent IOKit access
+		std::lock_guard<std::mutex> lock(iokit_mutex);
+
 		io_registry_entry_t drive;
 		io_iterator_t drive_list;
 
-		mach_port_t libtop_master_port;
-		if (IOMasterPort(bootstrap_port, &libtop_master_port)) {
-			Logger::error("errot getting master port");
-			return;
-		}
 		/* Get the list of all drive objects. */
-		if (IOServiceGetMatchingServices(libtop_master_port,
+		if (IOServiceGetMatchingServices(kIOMainPortDefault,
 										 IOServiceMatching("IOMediaBSDClient"), &drive_list)) {
 			Logger::error("Error in IOServiceGetMatchingServices()");
 			return;
@@ -632,9 +1198,8 @@ namespace Mem {
 							string mountpoint = mapping.at(device);
 							if (disks.contains(mountpoint)) {
 								auto& disk = disks.at(mountpoint);
-								CFDictionaryRef properties;
-								IORegistryEntryCreateCFProperties(volumeRef, (CFMutableDictionaryRef *)&properties, kCFAllocatorDefault, 0);
-								if (properties) {
+								CFDictionaryRef properties = nullptr;
+								if (IORegistryEntryCreateCFProperties(volumeRef, (CFMutableDictionaryRef *)&properties, kCFAllocatorDefault, 0) == KERN_SUCCESS and properties != nullptr) {
 									CFDictionaryRef statistics = (CFDictionaryRef)CFDictionaryGetValue(properties, CFSTR("Statistics"));
 									if (statistics) {
 										disk_ios++;
@@ -661,8 +1226,8 @@ namespace Mem {
 											disk.io_activity.push_back(clamp((long)round((double)(disk.io_write.back() + disk.io_read.back()) / (1 << 20)), 0l, 100l));
 										while (cmp_greater(disk.io_activity.size(), width * 2)) disk.io_activity.pop_front();
 									}
+									CFRelease(properties);
 								}
-								CFRelease(properties);
 							}
 						}
 					}
@@ -733,7 +1298,7 @@ namespace Mem {
 			}
 
 			struct statfs *stfs;
-			int count = getmntinfo(&stfs, MNT_WAIT);
+			int count = getmntinfo(&stfs, MNT_NOWAIT);
 			vector<string> found;
 			found.reserve(last_found.size());
 			for (int i = 0; i < count; i++) {
@@ -783,20 +1348,53 @@ namespace Mem {
 			if (found.size() != last_found.size()) redraw = true;
 			last_found = std::move(found);
 
-			//? Get disk/partition stats
-			for (auto &[mountpoint, disk] : disks) {
-				if (std::error_code ec; not fs::exists(mountpoint, ec))
-					continue;
-				struct statvfs vfs;
-				if (statvfs(mountpoint.c_str(), &vfs) < 0) {
-					Logger::warning("Failed to get disk/partition stats with statvfs() for: " + mountpoint);
+			//? Get disk/partition stats asynchronously to avoid blocking on unresponsive network mounts (e.g. SMB/NFS during backup)
+			static std::unordered_map<string, std::future<std::pair<disk_info, int>>> disks_stats_promises;
+			for (auto it = disks.begin(); it != disks.end(); ) {
+				auto &[mountpoint, disk] = *it;
+				if (mountpoint == "swap") {
+					++it;
 					continue;
 				}
-				disk.total = vfs.f_blocks * vfs.f_frsize;
-				disk.free = vfs.f_bfree * vfs.f_frsize;
-				disk.used = disk.total - disk.free;
-				disk.used_percent = round((double)disk.used * 100 / disk.total);
-				disk.free_percent = 100 - disk.used_percent;
+				if (auto promises_it = disks_stats_promises.find(mountpoint); promises_it != disks_stats_promises.end()) {
+					auto& promise = promises_it->second;
+					if (promise.valid() && promise.wait_for(std::chrono::seconds(0)) == std::future_status::timeout) {
+						++it;
+						continue;
+					}
+					auto promise_res = promises_it->second.get();
+					disks_stats_promises.erase(promises_it);
+					if (promise_res.second != -1) {
+						Logger::warning("Failed to get disk/partition stats with statvfs() for: {}", mountpoint);
+						++it;
+						continue;
+					}
+					auto &updated_stats = promise_res.first;
+					disk.total = updated_stats.total;
+					disk.free = updated_stats.free;
+					disk.used = updated_stats.used;
+					disk.used_percent = updated_stats.used_percent;
+					disk.free_percent = updated_stats.free_percent;
+				}
+				disks_stats_promises[mountpoint] = std::async(std::launch::async, [mountpoint]() -> std::pair<disk_info, int> {
+					struct statvfs vfs;
+					disk_info disk;
+					if (statvfs(mountpoint.c_str(), &vfs) < 0) {
+						return {disk, errno};
+					}
+					disk.total = vfs.f_blocks * vfs.f_frsize;
+					disk.free = vfs.f_bfree * vfs.f_frsize;
+					disk.used = disk.total - disk.free;
+					if (disk.total != 0) {
+						disk.used_percent = round((double)disk.used * 100 / disk.total);
+						disk.free_percent = 100 - disk.used_percent;
+					} else {
+						disk.used_percent = 0;
+						disk.free_percent = 0;
+					}
+					return {disk, -1};
+				});
+				++it;
 			}
 
 			//? Setup disks order in UI and add swap if enabled
@@ -852,6 +1450,8 @@ namespace Net {
 	};
 
 	auto collect(bool no_update) -> net_info & {
+		// Lock mutex to prevent concurrent interface access during USB device changes
+		std::lock_guard<std::mutex> lock(Mem::interface_mutex);
 		auto &net = current_net;
 		auto &config_iface = Config::getS("net_iface");
 		auto net_sync = Config::getB("net_sync");
@@ -863,7 +1463,7 @@ namespace Net {
 			getifaddr_wrapper if_wrap{};
 			if (if_wrap.status != 0) {
 				errors++;
-				Logger::error("Net::collect() -> getifaddrs() failed with id " + to_string(if_wrap.status));
+				Logger::error("Net::collect() -> getifaddrs() failed with id {}", if_wrap.status);
 				redraw = true;
 				return empty_net;
 			}
@@ -896,7 +1496,7 @@ namespace Net {
 							net[iface].ipv4 = ip;
 						} else {
 							int errsv = errno;
-							Logger::error("Net::collect() -> Failed to convert IPv4 to string for iface " + string(iface) + ", errno: " + strerror(errsv));
+							Logger::error("Net::collect() -> Failed to convert IPv4 to string for iface {}, errno: {}", iface, strerror(errsv));
 						}
 					}
 				}
@@ -907,7 +1507,7 @@ namespace Net {
 							net[iface].ipv6 = ip;
 						} else {
 							int errsv = errno;
-							Logger::error("Net::collect() -> Failed to convert IPv6 to string for iface " + string(iface) + ", errno: " + strerror(errsv));
+							Logger::error("Net::collect() -> Failed to convert IPv6 to string for iface {}, errno: {}", iface, strerror(errsv));
 						}
 					}
 				} // else, ignoring family==AF_LINK (see man 3 getifaddrs)
@@ -1061,16 +1661,18 @@ namespace Proc {
 	string current_sort;
 	string current_filter;
 	bool current_rev = false;
+	bool is_tree_mode;
 
 	fs::file_time_type passwd_time;
 
 	uint64_t cputimes;
-	int collapse = -1, expand = -1;
+	int collapse = -1, expand = -1, toggle_children = -1, collapse_all = -1;
 	uint64_t old_cputimes = 0;
 	atomic<int> numpids = 0;
 	int filter_found = 0;
 
 	detail_container detailed;
+	static std::unordered_set<size_t> dead_procs;
 
 	string get_status(char s) {
 		if (s & SRUN) return "Running";
@@ -1101,7 +1703,9 @@ namespace Proc {
 		//? Process runtime : current time - start time (both in unix time - seconds since epoch)
 		struct timeval currentTime;
 		gettimeofday(&currentTime, nullptr);
-		detailed.elapsed = sec_to_dhms(currentTime.tv_sec - (detailed.entry.cpu_s / 1'000'000));
+		//? Get elapsed time if process isn't dead
+		if (detailed.entry.state != 'X') detailed.elapsed = sec_to_dhms(currentTime.tv_sec - (detailed.entry.cpu_s / 1'000'000));
+		else detailed.elapsed = sec_to_dhms(detailed.entry.death_time);
 		if (detailed.elapsed.size() > 8) detailed.elapsed.resize(detailed.elapsed.size() - 3);
 
 		//? Get parent process name
@@ -1139,14 +1743,17 @@ namespace Proc {
 		auto per_core = Config::getB("proc_per_core");
 		auto tree = Config::getB("proc_tree");
 		auto show_detailed = Config::getB("show_detailed");
+		const auto pause_proc_list = Config::getB("pause_proc_list");
 		const size_t detailed_pid = Config::getI("detailed_pid");
 		bool should_filter = current_filter != filter;
 		if (should_filter) current_filter = filter;
 		bool sorted_change = (sorting != current_sort or reverse != current_rev or should_filter);
+		bool tree_mode_change = tree != is_tree_mode;
 		if (sorted_change) {
 			current_sort = sorting;
 			current_rev = reverse;
 		}
+		if (tree_mode_change) is_tree_mode = tree;
 
 		const int cmult = (per_core) ? Shared::coreCount : 1;
 		bool got_detailed = false;
@@ -1201,11 +1808,16 @@ namespace Proc {
 					//? Check if pid already exists in current_procs
 					bool no_cache = false;
 					auto find_old = rng::find(current_procs, pid, &proc_info::pid);
+					//? Only add new processes if not paused
 					if (find_old == current_procs.end()) {
-						current_procs.push_back({pid});
-						find_old = current_procs.end() - 1;
-						no_cache = true;
+						if (not pause_proc_list) {
+							current_procs.push_back({pid});
+							find_old = current_procs.end() - 1;
+							no_cache = true;
+						}
+						else continue;
 					}
+					else if (dead_procs.contains(pid)) continue;
 
 					auto &new_proc = *find_old;
 
@@ -1249,19 +1861,28 @@ namespace Proc {
 						new_proc.ppid = kproc.kp_eproc.e_ppid;
 						new_proc.cpu_s = kproc.kp_proc.p_starttime.tv_sec * 1'000'000 + kproc.kp_proc.p_starttime.tv_usec;
 						struct passwd *pwd = getpwuid(kproc.kp_eproc.e_ucred.cr_uid);
-						new_proc.user = pwd->pw_name;
+                        if (pwd != nullptr) {
+                            new_proc.user = pwd->pw_name;
+                        } else {
+                            new_proc.user = std::to_string(kproc.kp_eproc.e_ucred.cr_uid);
+                        }
 					}
 					new_proc.p_nice = kproc.kp_proc.p_nice;
 					new_proc.state = kproc.kp_proc.p_stat;
 
 					//? Get threads, mem and cpu usage
-					struct proc_taskinfo pti;
+					struct proc_taskinfo pti{};
 					if (sizeof(pti) == proc_pidinfo(new_proc.pid, PROC_PIDTASKINFO, 0, &pti, sizeof(pti))) {
 						new_proc.threads = pti.pti_threadnum;
 						new_proc.mem = pti.pti_resident_size;
 						cpu_t = pti.pti_total_user + pti.pti_total_system;
 
 						if (new_proc.cpu_t == 0) new_proc.cpu_t = cpu_t;
+					} else {
+						// Reset memory value if process info cannot be accessed (bad permissions or zombie processes)
+						new_proc.threads = 0;
+						new_proc.mem = 0;
+						cpu_t = new_proc.cpu_t;
 					}
 
 					//? Process cpu usage since last update
@@ -1278,9 +1899,32 @@ namespace Proc {
 					}
 				}
 
-				// //? Clear dead processes from current_procs
-				auto eraser = rng::remove_if(current_procs, [&](const auto &element) { return not v_contains(found, element.pid); });
-				current_procs.erase(eraser.begin(), eraser.end());
+				//? Clear dead processes from current_procs if not paused
+				if (not pause_proc_list) {
+					auto eraser = rng::remove_if(current_procs, [&](const auto& element) { return not v_contains(found, element.pid); });
+					current_procs.erase(eraser.begin(), eraser.end());
+					if (!dead_procs.empty()) dead_procs.clear();
+				}
+				//? Set correct state of dead processes if paused
+				else {
+					const bool keep_dead_proc_usage = Config::getB("keep_dead_proc_usage");
+					for (auto& r : current_procs) {
+						if (rng::find(found, r.pid) == found.end()) {
+							if (r.state != 'X') {
+								struct timeval currentTime;
+								gettimeofday(&currentTime, nullptr);
+								r.death_time = currentTime.tv_sec - (r.cpu_s / 1'000'000);
+							}
+							r.state = 'X';
+							dead_procs.emplace(r.pid);
+							//? Reset cpu usage for dead processes if paused and option is set
+							if (!keep_dead_proc_usage) {
+								r.cpu_p = 0.0;
+								r.mem = 0;
+							}
+						}
+					}
+				}
 
 				//? Update the details info box for process if active
 				if (show_detailed and got_detailed) {
@@ -1301,7 +1945,7 @@ namespace Proc {
 			filter_found = 0;
 			for (auto &p : current_procs) {
 				if (not tree and not filter.empty()) {
-					if (not s_contains_ic(to_string(p.pid), filter) and not s_contains_ic(p.name, filter) and not s_contains_ic(p.cmd, filter) and not s_contains_ic(p.user, filter)) {
+					if (!matches_filter(p, filter)) {
 						p.filtered = true;
 						filter_found++;
 					} else {
@@ -1314,13 +1958,30 @@ namespace Proc {
 		}
 
 		//* Sort processes
-		if (sorted_change or not no_update) {
+		if ((sorted_change or tree_mode_change) or (not no_update and not pause_proc_list)) {
 			proc_sorter(current_procs, sorting, reverse, tree);
 		}
 
 		//* Generate tree view if enabled
 		if (tree and (not no_update or should_filter or sorted_change)) {
 			bool locate_selection = false;
+
+			if (toggle_children != -1) {
+				auto collapser = rng::find(current_procs, toggle_children, &proc_info::pid);
+				if (collapser != current_procs.end()){
+					for (auto& p : current_procs) {
+						if (p.ppid == collapser->pid) {
+							auto child = rng::find(current_procs, p.pid, &proc_info::pid);
+							if (child != current_procs.end()){
+								child->collapsed = not child->collapsed;
+							}
+						}
+					}
+					if (Config::ints.at("proc_selected") > 0) locate_selection = true;
+				}
+				toggle_children = -1;
+			}
+
 			if (auto find_pid = (collapse != -1 ? collapse : expand); find_pid != -1) {
 				auto collapser = rng::find(current_procs, find_pid, &proc_info::pid);
 				if (collapser != current_procs.end()) {
@@ -1337,17 +1998,29 @@ namespace Proc {
 				}
 				collapse = expand = -1;
 			}
+
+			if (collapse_all != -1) {
+				toggle_tree_collapse(current_procs);
+				collapse_all = -1;
+				if (Config::ints.at("proc_selected") > 0) locate_selection = true;
+			}
+
 			if (should_filter or not filter.empty()) filter_found = 0;
 
 			vector<tree_proc> tree_procs;
 			tree_procs.reserve(current_procs.size());
 
-			for (auto& p : current_procs) {
-				if (not v_contains(found, p.ppid)) p.ppid = 0;
+			if (!pause_proc_list) {
+				for (auto& p : current_procs) {
+					if (not v_contains(found, p.ppid)) p.ppid = 0;
+				}
 			}
 
 			//? Stable sort to retain selected sorting among processes with the same parent
 			rng::stable_sort(current_procs, rng::less{}, & proc_info::ppid);
+
+			//? Auto-collapse processes with many children when entering tree mode
+			_auto_collapse_oversized(current_procs, tree_mode_change);
 
 			//? Start recursive iteration over processes with the lowest shared parent pids
 			for (auto& p : rng::equal_range(current_procs, current_procs.at(0).ppid, rng::less{}, &proc_info::ppid)) {
@@ -1356,18 +2029,15 @@ namespace Proc {
 
 			//? Recursive sort over tree structure to account for collapsed processes in the tree
 			int index = 0;
-			tree_sort(tree_procs, sorting, reverse, index, current_procs.size());
+			tree_sort(tree_procs, sorting, reverse, (pause_proc_list and not (sorted_change or tree_mode_change)), index, current_procs.size());
 
-			//? Add tree begin symbol to first item if childless
-			if (tree_procs.front().children.empty())
-				tree_procs.front().entry.get().prefix.replace(tree_procs.front().entry.get().prefix.size() - 8, 8, " ┌─ ");
-
-			//? Add tree terminator symbol to last item if childless
-			if (tree_procs.back().children.empty())
-				tree_procs.back().entry.get().prefix.replace(tree_procs.back().entry.get().prefix.size() - 8, 8, " └─ ");
+			//? Recursive construction of ASCII tree prefixes.
+			for (auto t = tree_procs.begin(); t != tree_procs.end(); ++t) {
+				_collect_prefixes(*t, t == tree_procs.end() - 1);
+			}
 
 			//? Final sort based on tree index
-			rng::sort(current_procs, rng::less{}, & proc_info::tree_index);
+			rng::stable_sort(current_procs, rng::less {}, &proc_info::tree_index);
 
 			//? Move current selection/view to the selected process when collapsing/expanding in the tree
 			if (locate_selection) {

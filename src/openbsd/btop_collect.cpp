@@ -62,8 +62,12 @@ tab-size = 4
 #include <regex>
 #include <string>
 #include <memory>
+#include <unordered_set>
+
+#include <fmt/format.h>
 
 #include "../btop_config.hpp"
+#include "../btop_log.hpp"
 #include "../btop_shared.hpp"
 #include "../btop_tools.hpp"
 
@@ -83,7 +87,7 @@ namespace Cpu {
 	vector<string> available_fields = {"total"};
 	vector<string> available_sensors = {"Auto"};
 	cpu_info current_cpu;
-	bool got_sensors = false, cpu_temp_only = false;
+	bool got_sensors = false, cpu_temp_only = false, supports_watts = false;
 
 	//* Populate found_sensors map
 	bool get_sensors();
@@ -121,15 +125,13 @@ namespace Shared {
 
 	void init() {
 		//? Shared global variables init
-		int mib[2];
-		mib[0] = CTL_HW;
-		mib[1] = HW_NCPU;
-		int ncpu;
-		size_t len = sizeof(ncpu);
-		if (sysctl(mib, 2, &ncpu, &len, nullptr, 0) == -1) {
+		int mib[] = {CTL_HW, HW_NCPUONLINE};
+		int ncpu_online;
+		size_t len = sizeof(ncpu_online);
+		if (sysctl(mib, 2, &ncpu_online, &len, nullptr, 0) == -1) {
 			Logger::warning("Could not determine number of cores, defaulting to 1.");
 		} else {
-			coreCount = ncpu;
+			coreCount = ncpu_online;
 		}
 
 		pageSize = sysconf(_SC_PAGE_SIZE);
@@ -211,46 +213,10 @@ namespace Cpu {
 			Logger::error("Failed to get CPU name");
 			return name;
 		}
-		name = string(buffer);
-
-		auto name_vec = ssplit(name);
-
-		if ((s_contains(name, "Xeon"s) or v_contains(name_vec, "Duo"s)) and v_contains(name_vec, "CPU"s)) {
-			auto cpu_pos = v_index(name_vec, "CPU"s);
-			if (cpu_pos < name_vec.size() - 1 and not name_vec.at(cpu_pos + 1).ends_with(')'))
-				name = name_vec.at(cpu_pos + 1);
-			else
-				name.clear();
-		} else if (v_contains(name_vec, "Ryzen"s)) {
-			auto ryz_pos = v_index(name_vec, "Ryzen"s);
-			name = "Ryzen" + (ryz_pos < name_vec.size() - 1 ? ' ' + name_vec.at(ryz_pos + 1) : "") + (ryz_pos < name_vec.size() - 2 ? ' ' + name_vec.at(ryz_pos + 2) : "");
-		} else if (s_contains(name, "Intel"s) and v_contains(name_vec, "CPU"s)) {
-			auto cpu_pos = v_index(name_vec, "CPU"s);
-			if (cpu_pos < name_vec.size() - 1 and not name_vec.at(cpu_pos + 1).ends_with(')') and name_vec.at(cpu_pos + 1) != "@")
-				name = name_vec.at(cpu_pos + 1);
-			else
-				name.clear();
-		} else
-			name.clear();
-
-		if (name.empty() and not name_vec.empty()) {
-			for (const auto &n : name_vec) {
-				if (n == "@") break;
-				name += n + ' ';
-			}
-			name.pop_back();
-			for (const auto& replace : {"Processor", "CPU", "(R)", "(TM)", "Intel", "AMD", "Core"}) {
-				name = s_replace(name, replace, "");
-				name = s_replace(name, "  ", " ");
-			}
-			name = trim(name);
-		}
-
-		return name;
+		return trim_name(string(buffer));
 	}
 
-	int64_t get_sensor(string device, sensor_type type, int num) {
-		int64_t temp = -1;
+	int64_t get_sensor(string device, vector<sensor_type> types, int num) {
 		struct sensordev sensordev;
 		struct sensor sensor;
 		size_t sdlen, slen;
@@ -268,25 +234,26 @@ namespace Cpu {
 					break;
 			}
 			if (strstr(sensordev.xname, device.c_str())) {
-				mib[3] = type;
 				mib[4] = num;
-				if (sysctl(mib, 5, &sensor, &slen, NULL, 0) == -1) {
-					if (errno != ENOENT) {
-						Logger::warning("sysctl");
-						continue;
-					}
+				for (sensor_type type : types) {
+					mib[3] = type;
+					if (sysctl(mib, 5, &sensor, &slen, NULL, 0) == -1) {
+						if (errno != ENOENT) {
+							Logger::warning("sysctl");
+							continue;
+						}
+					} else
+						return sensor.value;
 				}
-				temp = sensor.value;
-			 	break;
 			}
 		}
-		return temp;
+		return -1;
 	}
 
 	bool get_sensors() {
 		got_sensors = false;
 		if (Config::getB("show_coretemp") and Config::getB("check_temp")) {
-			if (get_sensor(string("cpu0") , SENSOR_TEMP, 0) > 0) {
+			if (get_sensor(string("cpu0"), { SENSOR_TEMP }, 0) > 0) {
 				got_sensors = true;
 				current_cpu.temp_max = 100; // we don't have this info
 			} else {
@@ -302,7 +269,7 @@ namespace Cpu {
 		int temp = 0;
 		int p_temp = 0;
 
-		temp = get_sensor(string("cpu0"), SENSOR_TEMP, 0);
+		temp = get_sensor(string("cpu0"), { SENSOR_TEMP }, 0);
 		if (temp > -1) {
 			temp = MUKTOC(temp);
 			p_temp = temp;
@@ -378,17 +345,23 @@ namespace Cpu {
 
 		long seconds = -1;
 		uint32_t percent = -1;
+		float rate = -1.0f;
 		string status = "discharging";
-		int64_t full, remaining;
-		full = get_sensor("acpibat0", SENSOR_AMPHOUR, 0);
-		remaining = get_sensor("acpibat0", SENSOR_AMPHOUR, 3);
-		int64_t state = get_sensor("acpibat0", SENSOR_INTEGER, 0);
+		int64_t full, remaining, watts;
+		full = get_sensor("acpibat0", { SENSOR_AMPHOUR, SENSOR_WATTHOUR }, 0);
+		remaining = get_sensor("acpibat0", { SENSOR_AMPHOUR, SENSOR_WATTHOUR }, 3);
+		watts = get_sensor("acpibat0", { SENSOR_WATTS }, 0);
+		int64_t state = get_sensor("acpibat0", { SENSOR_INTEGER }, 0);
 		if (full < 0) {
 			has_battery = false;
 			Logger::warning("failed to get battery");
 		} else {
 			float_t f = full / 1000;
 			float_t r = remaining / 1000;
+			if (watts > 0) {
+				supports_watts = true;
+				rate = watts / 1000000.0f; // watts is given in µW
+			}
 			has_battery = true;
 			percent = r / f * 100;
 			if (percent == 100) {
@@ -405,7 +378,7 @@ namespace Cpu {
 			}
 		}
 
-		return {percent, -1, seconds, status};
+		return {percent, rate, seconds, status};
 	}
 
 	auto collect(bool no_update) -> cpu_info & {
@@ -417,13 +390,37 @@ namespace Cpu {
 			Logger::error("failed to get load averages");
 		}
 
+		//? Read total physical CPU count for sysctl iteration
+		//? (may differ from coreCount when SMT is disabled via hw.smt=0).
+		int ncpu_total = Shared::coreCount;
+		{
+			int mib[] = {CTL_HW, HW_NCPU};
+			size_t len = sizeof(ncpu_total);
+			sysctl(mib, 2, &ncpu_total, &len, nullptr, 0);
+		}
+
+		//? Re-query online CPU count in case it changed at runtime (e.g. hw.smt toggled).
+		{
+			int mib[] = {CTL_HW, HW_NCPUONLINE};
+			int ncpu_online = Shared::coreCount;
+			size_t len = sizeof(ncpu_online);
+			if (sysctl(mib, 2, &ncpu_online, &len, nullptr, 0) != -1 and ncpu_online != Shared::coreCount) {
+				Shared::coreCount = ncpu_online;
+				core_old_totals.resize(Shared::coreCount, 0);
+				core_old_idles.resize(Shared::coreCount, 0);
+				cpu.core_percent.resize(Shared::coreCount);
+				cpu.temp.resize(Shared::coreCount + 1);
+				Runner::coreNum_reset = true;
+			}
+		}
+
 		auto cp_time = std::unique_ptr<struct cpustats[]>{
-			new struct cpustats[Shared::coreCount]
+			new struct cpustats[ncpu_total]
 		};
-		size_t size = Shared::coreCount * sizeof(struct cpustats);
+		size_t size = sizeof(struct cpustats);
 		static int cpustats_mib[] = {CTL_KERN, KERN_CPUSTATS, /*fillme*/0};
-		for (int i = 0; i < Shared::coreCount; i++) {
-			cpustats_mib[2] = i / 2;
+		for (int i = 0; i < ncpu_total; i++) {
+			cpustats_mib[2] = i;
 			if (sysctl(cpustats_mib, 3, &cp_time[i], &size, NULL, 0) == -1) {
 				Logger::error("sysctl kern.cpustats failed");
 			}
@@ -432,11 +429,16 @@ namespace Cpu {
 		long long global_idles = 0;
 		vector<long long> times_summed = {0, 0, 0, 0};
 
-		for (long i = 0; i < Shared::coreCount; i++) {
+		//? j iterates all physical CPUs; offline ones are skipped
+		//? i is the display slot index, incremented only for online CPUs
+		for (long i = 0, j = 0; j < ncpu_total; j++) {
+			if (!(cp_time[j].cs_flags & CPUSTATS_ONLINE))
+				continue;
+
 			vector<long long> times;
 			//? 0=user, 1=nice, 2=system, 3=idle
 			for (int x = 0; const unsigned int c_state : {CP_USER, CP_NICE, CP_SYS, CP_IDLE}) {
-				auto val = cp_time[i].cs_time[c_state];
+				auto val = cp_time[j].cs_time[c_state];
 				times.push_back(val);
 				times_summed.at(x++) += val;
 			}
@@ -451,7 +453,6 @@ namespace Cpu {
 				global_idles += idles;
 
 				//? Calculate cpu total for each core
-				if (i > Shared::coreCount) break;
 				const long long calc_totals = max(0ll, totals - core_old_totals.at(i));
 				const long long calc_idles = max(0ll, idles - core_old_idles.at(i));
 				core_old_totals.at(i) = totals;
@@ -463,10 +464,10 @@ namespace Cpu {
 				if (cpu.core_percent.at(i).size() > 40) cpu.core_percent.at(i).pop_front();
 
 			} catch (const std::exception &e) {
-				Logger::error("Cpu::collect() : " + (string)e.what());
-				throw std::runtime_error("collect() : " + (string)e.what());
+				Logger::error("Cpu::collect() : {}", e.what());
+				throw std::runtime_error(fmt::format("collect() : {}", e.what()));
 			}
-
+			i++;
 		}
 
 		const long long calc_totals = max(1ll, global_totals - cpu_old.at("totals"));
@@ -717,14 +718,19 @@ namespace Mem {
 					continue;
 				struct statvfs vfs;
 				if (statvfs(mountpoint.c_str(), &vfs) < 0) {
-					Logger::warning("Failed to get disk/partition stats with statvfs() for: " + mountpoint);
+					Logger::warning("Failed to get disk/partition stats with statvfs() for: {}", mountpoint);
 					continue;
 				}
 				disk.total = vfs.f_blocks * vfs.f_frsize;
 				disk.free = vfs.f_bfree * vfs.f_frsize;
 				disk.used = disk.total - disk.free;
-				disk.used_percent = round((double)disk.used * 100 / disk.total);
-				disk.free_percent = 100 - disk.used_percent;
+				if (disk.total != 0) {
+					disk.used_percent = round((double)disk.used * 100 / disk.total);
+					disk.free_percent = 100 - disk.used_percent;
+				} else {
+					disk.used_percent = 0;
+					disk.free_percent = 0;
+				}
 			}
 
 			//? Setup disks order in UI and add swap if enabled
@@ -780,7 +786,7 @@ namespace Net {
 			IfAddrsPtr if_addrs {};
 			if (if_addrs.get_status() != 0) {
 				errors++;
-				Logger::error("Net::collect() -> getifaddrs() failed with id " + to_string(if_addrs.get_status()));
+				Logger::error("Net::collect() -> getifaddrs() failed with id {}", if_addrs.get_status());
 				redraw = true;
 				return empty_net;
 			}
@@ -815,7 +821,7 @@ namespace Net {
 							net[iface].ipv4 = ip;
 						} else {
 							int errsv = errno;
-							Logger::error("Net::collect() -> Failed to convert IPv4 to string for iface " + string(iface) + ", errno: " + strerror(errsv));
+							Logger::error("Net::collect() -> Failed to convert IPv4 to string for iface {}, errno: {}", iface, strerror(errsv));
 						}
 					}
 				}
@@ -826,7 +832,7 @@ namespace Net {
 							net[iface].ipv6 = ip;
 						} else {
 							int errsv = errno;
-							Logger::error("Net::collect() -> Failed to convert IPv6 to string for iface " + string(iface) + ", errno: " + strerror(errsv));
+							Logger::error("Net::collect() -> Failed to convert IPv6 to string for iface {}, errno: {}", iface, strerror(errsv));
 						}
 					}
 				}  //else, ignoring family==AF_LINK (see man 3 getifaddrs)
@@ -980,16 +986,18 @@ namespace Proc {
 	string current_sort;
 	string current_filter;
 	bool current_rev = false;
+	bool is_tree_mode;
 
 	fs::file_time_type passwd_time;
 
 	uint64_t cputimes;
-	int collapse = -1, expand = -1;
+	int collapse = -1, expand = -1, toggle_children = -1, collapse_all = -1;
 	uint64_t old_cputimes = 0;
 	atomic<int> numpids = 0;
 	int filter_found = 0;
 
 	detail_container detailed;
+	static std::unordered_set<size_t> dead_procs;
 
 	string get_status(char s) {
 		if (s & SRUN) return "Running";
@@ -1020,7 +1028,9 @@ namespace Proc {
 		//? Process runtime : current time - start time (both in unix time - seconds since epoch)
 		struct timeval currentTime;
 		gettimeofday(&currentTime, nullptr);
-		detailed.elapsed = sec_to_dhms(currentTime.tv_sec - detailed.entry.cpu_s); // only interested in second granularity, so ignoring tc_usec
+		// only interested in second granularity, so ignoring tc_usec
+		if (detailed.entry.state != 'X') detailed.elapsed = sec_to_dhms(currentTime.tv_sec - detailed.entry.cpu_s);
+		else detailed.elapsed = sec_to_dhms(detailed.entry.death_time);
 		if (detailed.elapsed.size() > 8) detailed.elapsed.resize(detailed.elapsed.size() - 3);
 
 		//? Get parent process name
@@ -1051,14 +1061,17 @@ namespace Proc {
 		auto per_core = Config::getB("proc_per_core");
 		auto tree = Config::getB("proc_tree");
 		auto show_detailed = Config::getB("show_detailed");
+		const auto pause_proc_list = Config::getB("pause_proc_list");
 		const size_t detailed_pid = Config::getI("detailed_pid");
 		bool should_filter = current_filter != filter;
 		if (should_filter) current_filter = filter;
 		bool sorted_change = (sorting != current_sort or reverse != current_rev or should_filter);
+		bool tree_mode_change = tree != is_tree_mode;
 		if (sorted_change) {
 			current_sort = sorting;
 			current_rev = reverse;
 		}
+		if (tree_mode_change) is_tree_mode = tree;
 
 		const int cmult = (per_core) ? Shared::coreCount : 1;
 		bool got_detailed = false;
@@ -1091,11 +1104,16 @@ namespace Proc {
 				//? Check if pid already exists in current_procs
 				bool no_cache = false;
 				auto find_old = rng::find(current_procs, pid, &proc_info::pid);
+				//? Only add new processes if not paused
 				if (find_old == current_procs.end()) {
-					current_procs.push_back({pid});
-					find_old = current_procs.end() - 1;
-					no_cache = true;
+					if (not pause_proc_list) {
+						current_procs.push_back({pid});
+						find_old = current_procs.end() - 1;
+						no_cache = true;
+					}
+					else continue;
 				}
+				else if (dead_procs.contains(pid)) continue;
 
 				auto &new_proc = *find_old;
 
@@ -1148,9 +1166,32 @@ namespace Proc {
 				}
 			}
 
-			//? Clear dead processes from current_procs
-			auto eraser = rng::remove_if(current_procs, [&](const auto &element) { return not v_contains(found, element.pid); });
-			current_procs.erase(eraser.begin(), eraser.end());
+			//? Clear dead processes from current_procs if not paused
+			if (not pause_proc_list) {
+				auto eraser = rng::remove_if(current_procs, [&](const auto& element) { return not v_contains(found, element.pid); });
+				current_procs.erase(eraser.begin(), eraser.end());
+				if (!dead_procs.empty()) dead_procs.clear();
+			}
+			//? Set correct state of dead processes if paused
+			else {
+				const bool keep_dead_proc_usage = Config::getB("keep_dead_proc_usage");
+				for (auto& r : current_procs) {
+					if (rng::find(found, r.pid) == found.end()) {
+						if (r.state != 'X') {
+							struct timeval currentTime;
+							gettimeofday(&currentTime, nullptr);
+							r.death_time = currentTime.tv_sec - r.cpu_s;
+						}
+						r.state = 'X';
+						dead_procs.emplace(r.pid);
+						//? Reset cpu usage for dead processes if paused and option is set
+						if (!keep_dead_proc_usage) {
+							r.cpu_p = 0.0;
+							r.mem = 0;
+						}
+					}
+				}
+			}
 
 			//? Update the details info box for process if active
 			if (show_detailed and got_detailed) {
@@ -1171,31 +1212,43 @@ namespace Proc {
 			filter_found = 0;
 			for (auto& p : current_procs) {
 				if (not tree and not filter.empty()) {
-						if (not s_contains_ic(to_string(p.pid), filter)
-						and not s_contains_ic(p.name, filter)
-						and not s_contains_ic(p.cmd, filter)
-						and not s_contains_ic(p.user, filter)) {
-							p.filtered = true;
-							filter_found++;
-							}
-						else {
-							p.filtered = false;
-						}
+					if (!matches_filter(p, filter)) {
+						p.filtered = true;
+						filter_found++;
+					} else {
+						p.filtered = false;
 					}
-				else {
+				} else {
 					p.filtered = false;
 				}
 			}
 		}
 
 		//* Sort processes
-		if (sorted_change or not no_update) {
+		if ((sorted_change or tree_mode_change) or (not no_update and not pause_proc_list)) {
 			proc_sorter(current_procs, sorting, reverse, tree);
 		}
 
 		//* Generate tree view if enabled
 		if (tree and (not no_update or should_filter or sorted_change)) {
 			bool locate_selection = false;
+
+			if (toggle_children != -1) {
+				auto collapser = rng::find(current_procs, toggle_children, &proc_info::pid);
+				if (collapser != current_procs.end()){
+					for (auto& p : current_procs) {
+						if (p.ppid == collapser->pid) {
+							auto child = rng::find(current_procs, p.pid, &proc_info::pid);
+							if (child != current_procs.end()){
+								child->collapsed = not child->collapsed;
+							}
+						}
+					}
+					if (Config::ints.at("proc_selected") > 0) locate_selection = true;
+				}
+				toggle_children = -1;
+			}
+
 			if (auto find_pid = (collapse != -1 ? collapse : expand); find_pid != -1) {
 				auto collapser = rng::find(current_procs, find_pid, &proc_info::pid);
 				if (collapser != current_procs.end()) {
@@ -1212,17 +1265,29 @@ namespace Proc {
 				}
 				collapse = expand = -1;
 			}
+
+			if (collapse_all != -1) {
+				toggle_tree_collapse(current_procs);
+				collapse_all = -1;
+				if (Config::ints.at("proc_selected") > 0) locate_selection = true;
+			}
+
 			if (should_filter or not filter.empty()) filter_found = 0;
 
 			vector<tree_proc> tree_procs;
 			tree_procs.reserve(current_procs.size());
 
-			for (auto& p : current_procs) {
-				if (not v_contains(found, p.ppid)) p.ppid = 0;
+			if (!pause_proc_list) {
+				for (auto& p : current_procs) {
+					if (not v_contains(found, p.ppid)) p.ppid = 0;
+				}
 			}
 
 			//? Stable sort to retain selected sorting among processes with the same parent
 			rng::stable_sort(current_procs, rng::less{}, & proc_info::ppid);
+
+			//? Auto-collapse processes with many children when entering tree mode
+			_auto_collapse_oversized(current_procs, tree_mode_change);
 
 			//? Start recursive iteration over processes with the lowest shared parent pids
 			for (auto& p : rng::equal_range(current_procs, current_procs.at(0).ppid, rng::less{}, &proc_info::ppid)) {
@@ -1231,18 +1296,15 @@ namespace Proc {
 
 			//? Recursive sort over tree structure to account for collapsed processes in the tree
 			int index = 0;
-			tree_sort(tree_procs, sorting, reverse, index, current_procs.size());
+			tree_sort(tree_procs, sorting, reverse, (pause_proc_list and not (sorted_change or tree_mode_change)), index, current_procs.size());
 
-			//? Add tree begin symbol to first item if childless
-			if (tree_procs.front().children.empty())
-				tree_procs.front().entry.get().prefix.replace(tree_procs.front().entry.get().prefix.size() - 8, 8, " ┌─ ");
-
-			//? Add tree terminator symbol to last item if childless
-			if (tree_procs.back().children.empty())
-				tree_procs.back().entry.get().prefix.replace(tree_procs.back().entry.get().prefix.size() - 8, 8, " └─ ");
+			//? Recursive construction of ASCII tree prefixes.
+			for (auto t = tree_procs.begin(); t != tree_procs.end(); ++t) {
+				_collect_prefixes(*t, t == tree_procs.end() - 1);
+			}
 
 			//? Final sort based on tree index
-			rng::sort(current_procs, rng::less{}, & proc_info::tree_index);
+			rng::stable_sort(current_procs, rng::less {}, &proc_info::tree_index);
 
 			//? Move current selection/view to the selected process when collapsing/expanding in the tree
 			if (locate_selection) {
