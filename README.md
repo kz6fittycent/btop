@@ -1296,23 +1296,21 @@ If you want to disable building tests, pass `-DBUILD_TESTING=OFF` to the configu
 ## Installing the snap
 [![btop](https://snapcraft.io/btop/badge.svg)](https://snapcraft.io/btop)
 
-### Note: there are now two snaps available: `btop` and `btop-desktop`. The desktop version is much larger and includes the desktop entries needed to allow for launching `btop` with a click.
-
  * **Install the snap**
 
     ```bash
     sudo snap install btop
-    or
-    sudo snap install btop-desktop
     ```
 
- * **Connect the interface**
+ * **Connect the interface** (optional, to see removable drives)
 
     ```bash
-	sudo snap connect btop:removable-media
-	or
-	sudo snap connect btop-desktop:removable-media
-	```
+    sudo snap connect btop:removable-media
+    ```
+
+The snap keeps its config in `~/snap/btop/current/.config/btop`. Quit with `q` or `Ctrl+C` or just close the terminal, your theme and settings are saved either way.
+
+Want a desktop launcher? See [btop-desktop](https://github.com/kz6fittycent/btop-desktop) (`sudo snap install btop-desktop`).
 
 ## Configurability
 
