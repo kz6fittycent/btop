@@ -18,7 +18,7 @@ sudo snap connect btop:removable-media
 
 ## Notes
 
-- Config lives in `~/snap/btop/current/.config/btop`.
+- Config lives in `~/snap/btop/common/.config/btop` (shared by every revision, so a refresh never loses it).
 - Quit with `q`, `Ctrl+C` or just close the terminal. Theme and settings are saved either way (`snap/local/btop-session` handles the close).
 - Want a desktop launcher? See [btop-desktop](https://github.com/kz6fittycent/btop-desktop).
 

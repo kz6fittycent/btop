@@ -1,11 +1,28 @@
 #!/bin/sh
-# btop only saves its config (theme and every other menu change) on a clean
-# quit. It has no SIGHUP handler, so closing the terminal tab or the
-# btop-desktop window kills it before anything is written, and the settings
-# seem to "reset".
+# Wraps btop so its settings stick.
 #
-# Run btop with SIGHUP ignored, catch the hangup here, and send btop SIGINT
-# instead. That makes it take its normal quit path and write btop.conf.
+# 1. btop only saves its config (theme and every other menu change) on a
+#    clean quit. It has no SIGHUP handler, so closing the terminal tab or the
+#    btop-desktop window kills it before anything is written. Run btop with
+#    SIGHUP ignored, catch the hangup here, and send btop SIGINT instead, so
+#    it takes its normal quit path and writes btop.conf.
+#
+# 2. $SNAP_USER_DATA (~/snap/<name>/<revision>) is per revision. If btop is
+#    still running when the snap refreshes, it saves into the old revision and
+#    the new one never sees it. Keep btop's config in $SNAP_USER_COMMON
+#    instead, which doesn't change between revisions. The first run copies
+#    over the existing config. Only btop gets this; GTK in btop-desktop keeps
+#    its usual config dir.
+if [ -n "$SNAP_USER_COMMON" ]; then
+  old="${XDG_CONFIG_HOME:-$HOME/.config}/btop"
+  new_base="$SNAP_USER_COMMON/.config"
+  mkdir -p "$new_base"
+  if [ ! -e "$new_base/btop" ] && [ -d "$old" ]; then
+    cp -a "$old" "$new_base/btop"
+  fi
+  export XDG_CONFIG_HOME="$new_base"
+fi
+
 trap 'kill -INT "$pid" 2>/dev/null' HUP TERM
 trap ':' INT            # Ctrl-C goes straight to btop; just don't die here
 exec 3<&0               # async jobs would otherwise get /dev/null as stdin
