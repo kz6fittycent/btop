@@ -26,6 +26,7 @@ platforms:
 apps:
   btop:
     command: usr/local/bin/btop
+    command-chain: [bin/btop-session]
     environment:
       LC_ALL: C.UTF-8
       LANG: C.UTF-8
@@ -62,3 +63,11 @@ parts:
     override-pull: |
       craftctl default
       craftctl set version="$(git describe --tags | sed 's/^v//' | cut -d "-" -f1)"
+
+  # Saves btop's settings when the terminal is closed (see the script).
+  btop-session:
+    plugin: dump
+    source: snap/local
+    organize:
+      btop-session: bin/btop-session
+    stage: [bin/btop-session]

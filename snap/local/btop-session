@@ -1,0 +1,19 @@
+#!/bin/sh
+# btop only saves its config (theme and every other menu change) on a clean
+# quit. It has no SIGHUP handler, so closing the terminal tab or the
+# btop-desktop window kills it before anything is written, and the settings
+# seem to "reset".
+#
+# Run btop with SIGHUP ignored, catch the hangup here, and send btop SIGINT
+# instead. That makes it take its normal quit path and write btop.conf.
+trap 'kill -INT "$pid" 2>/dev/null' HUP TERM
+trap ':' INT            # Ctrl-C goes straight to btop; just don't die here
+exec 3<&0               # async jobs would otherwise get /dev/null as stdin
+(trap '' HUP; exec "$@") <&3 3<&- &
+pid=$!
+exec 3<&-
+status=0
+while kill -0 "$pid" 2>/dev/null; do
+  wait "$pid"; status=$?
+done
+exit "$status"
