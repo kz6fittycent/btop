@@ -50,8 +50,9 @@ parts:
       - CC=gcc-14
       - CXX=g++-14
       - PREFIX=/usr/local
-      - STATIC=true #required
       - ADDFLAGS="-D SNAPPED" #required
+      # Not STATIC=true: btop dlopen()s the GPU libraries (NVML) at runtime,
+      # which a static build can't do, so upstream turns GPU support off.
     build-packages:
       - coreutils
       - sed

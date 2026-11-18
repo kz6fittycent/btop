@@ -23,6 +23,13 @@ if [ -n "$SNAP_USER_COMMON" ]; then
   export XDG_CONFIG_HOME="$new_base"
 fi
 
+# 3. GPU stats: btop dlopen()s the host's libnvidia-ml, which snapd exposes in
+#    /var/lib/snapd/lib/gl through the opengl interface.
+case ":$LD_LIBRARY_PATH:" in
+  *:/var/lib/snapd/lib/gl:*) ;;
+  *) export LD_LIBRARY_PATH="/var/lib/snapd/lib/gl${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ;;
+esac
+
 trap 'kill -INT "$pid" 2>/dev/null' HUP TERM
 trap ':' INT            # Ctrl-C goes straight to btop; just don't die here
 exec 3<&0               # async jobs would otherwise get /dev/null as stdin
